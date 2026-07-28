@@ -1,0 +1,5 @@
+cache,ratio,attack,num_banks,num_attacks,format,plot
+normal,0.3,region0,2,2,single,results/normal/plots_bit_diff_misses/normal_ratio-0.3_attack-region0_banks2_attack2_delta_misses_single.png
+normal,0.5,region0,2,2,single,results/normal/plots_bit_diff_misses/normal_ratio-0.5_attack-region0_banks2_attack2_delta_misses_single.png
+normal,0.5,simultaneous,2,2,dual,results/normal/plots_bit_diff_misses/normal_ratio-0.5_attack-simultaneous_banks2_attack2_delta_misses_dual.png
+normal,1.0,region0,2,2,single,results/normal/plots_bit_diff_misses/normal_ratio-1.0_attack-region0_banks2_attack2_delta_misses_single.png

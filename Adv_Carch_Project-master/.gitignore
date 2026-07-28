@@ -1,0 +1,5 @@
+.DS_Store
+llc_sim/
+__pycache__/
+results_with_full_randomisation/
+
