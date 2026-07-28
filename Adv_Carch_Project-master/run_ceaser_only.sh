@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd "/home/ambarish-sarkar/IITH/Thesis/multi-bank_llc_simulator/Adv_Carch_Project-master/Ceaser_cache_occupancy"
+cd Ceaser_cache_occupancy
 
 echo "Running region0 attack for 100/0 split"
 sed -i 's/region-split-ratio=.*/region-split-ratio=1/g' config.ini
