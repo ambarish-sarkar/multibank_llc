@@ -3,3 +3,12 @@ llc_sim/
 __pycache__/
 results_with_full_randomisation/
 
+# Editor / local IDE state
+.vscode/
+.qodo/
+.claude/
+
+# Python bytecode and cache directories
+*.pyc
+.pytest_cache/
+.mypy_cache/
