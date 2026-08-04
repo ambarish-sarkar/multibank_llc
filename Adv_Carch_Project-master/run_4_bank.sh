@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-BASE="/home/mtp2/Thesis_Ambarish/multi-bank_llc_simulator/Adv_Carch_Project-master"
+BASE="/home/mtp2/Thesis_Ambarish/multibank_llc/Adv_Carch_Project-master"
 
 declare -A DIRS=(
   [mirage]="Mirage_cache_occupancy"
