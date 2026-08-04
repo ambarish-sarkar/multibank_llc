@@ -2,4 +2,6 @@ cache,ratio,attack,num_banks,num_attacks,format,plot
 ceaser_s,0.3,region0,2,2,single,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-0.3_attack-region0_banks2_attack2_delta_misses_single.png
 ceaser_s,0.5,region0,2,2,single,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-0.5_attack-region0_banks2_attack2_delta_misses_single.png
 ceaser_s,0.5,simultaneous,2,2,dual,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-0.5_attack-simultaneous_banks2_attack2_delta_misses_dual.png
+ceaser_s,0.5,simultaneous,4,1,single,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-0.5_attack-simultaneous_banks4_attack1_delta_misses_single.png
+ceaser_s,0.5,simultaneous,4,4,multi,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-0.5_attack-simultaneous_banks4_attack4_delta_misses_multi.png
 ceaser_s,1.0,region0,2,2,single,results/ceaser_s/plots_bit_diff_misses/ceaser_s_ratio-1.0_attack-region0_banks2_attack2_delta_misses_single.png
