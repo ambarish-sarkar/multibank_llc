@@ -11,6 +11,7 @@ from common import (
     get_block_number,
     get_local_set,
     get_snuca_geometry,
+    require_power_of_two,
 )
 
 
@@ -25,6 +26,13 @@ NUM_PARTITIONS = {
     "Ceaser-s_cache_occupancy": 2,
     "ScatterCache_cache_occupancy": 2,
 }
+MIRAGE_DESIGN = "Mirage_cache_occupancy"
+MIRAGE_PARTITIONS = 2
+MIRAGE_ADDITIONAL_TAGS = 6
+MIRAGE_TAG_WAYS = NUM_BLOCKS_PER_SET + MIRAGE_ADDITIONAL_TAGS
+MIRAGE_GLOBAL_DATA_BLOCKS = 131072
+MIRAGE_GLOBAL_SETS_PER_SKEW = 8192
+MIRAGE_GLOBAL_TAG_ENTRIES = 229376
 
 
 def clear_design_modules():
@@ -392,6 +400,342 @@ def check_one_bank_equivalence():
     print("One-bank wrapper equivalence OK")
 
 
+def get_mirage_geometry(banks):
+    require_power_of_two(banks, "num_banks")
+    global_data_blocks = (CACHE_SIZE // BYTES_PER_WORD) // NUM_WORDS_PER_BLOCK
+    if global_data_blocks != MIRAGE_GLOBAL_DATA_BLOCKS:
+        raise AssertionError(global_data_blocks)
+    if global_data_blocks % banks != 0:
+        raise ValueError("MIRAGE data blocks must be divisible by banks")
+
+    global_sets_per_skew_num = global_data_blocks // MIRAGE_PARTITIONS
+    if global_sets_per_skew_num % NUM_BLOCKS_PER_SET != 0:
+        raise ValueError("MIRAGE data blocks/skew must divide by data ways")
+    global_sets_per_skew = global_sets_per_skew_num // NUM_BLOCKS_PER_SET
+    if global_sets_per_skew != MIRAGE_GLOBAL_SETS_PER_SKEW:
+        raise AssertionError(global_sets_per_skew)
+    if global_sets_per_skew % banks != 0:
+        raise ValueError("MIRAGE sets/skew must be divisible by banks")
+
+    sets_per_skew_per_bank = global_sets_per_skew // banks
+    require_power_of_two(sets_per_skew_per_bank, "sets_per_skew_per_bank")
+    data_blocks_per_bank = global_data_blocks // banks
+    tag_blocks_per_skew_per_bank = sets_per_skew_per_bank * MIRAGE_TAG_WAYS
+    total_tag_entries = (
+        banks * MIRAGE_PARTITIONS * tag_blocks_per_skew_per_bank
+    )
+    total_data_blocks = banks * data_blocks_per_bank
+    return {
+        "global_data_blocks": global_data_blocks,
+        "data_blocks_per_bank": data_blocks_per_bank,
+        "global_sets_per_skew": global_sets_per_skew,
+        "sets_per_skew_per_bank": sets_per_skew_per_bank,
+        "global_index_bits": int(math.log2(global_sets_per_skew)),
+        "local_index_bits": int(math.log2(sets_per_skew_per_bank)),
+        "tag_blocks_per_skew_per_bank": tag_blocks_per_skew_per_bank,
+        "total_tag_entries": total_tag_entries,
+        "total_data_blocks": total_data_blocks,
+        "tag_data_ratio": total_tag_entries / total_data_blocks,
+    }
+
+
+def make_mirage_reference(ref_mod, word_address, banks, target_bank):
+    geom = get_mirage_geometry(banks)
+    offset_bits = int(math.log2(NUM_WORDS_PER_BLOCK))
+    tag_bits = NUM_ADDR_BITS - geom["global_index_bits"] - offset_bits
+    return ref_mod.Reference(
+        word_address,
+        NUM_ADDR_BITS,
+        offset_bits,
+        geom["local_index_bits"],
+        tag_bits,
+        MIRAGE_PARTITIONS,
+        geom["tag_blocks_per_skew_per_bank"],
+        target_region=target_bank,
+    )
+
+
+def make_mirage_wrapper(wrapper_mod, banks):
+    geom = get_mirage_geometry(banks)
+    return wrapper_mod.HybridWrapperCache(
+        num_regions=banks,
+        region_split_ratio=0.5,
+        num_data_blocks=geom["data_blocks_per_bank"],
+        num_sets_per_skew=geom["sets_per_skew_per_bank"],
+        num_index_bits=geom["local_index_bits"],
+        num_partitions=MIRAGE_PARTITIONS,
+        num_tag_blocks_per_skew=geom["tag_blocks_per_skew_per_bank"],
+        num_addr_bits=NUM_ADDR_BITS,
+        num_offset_bits=int(math.log2(NUM_WORDS_PER_BLOCK)),
+        num_total_ways=MIRAGE_TAG_WAYS,
+    )
+
+
+def mirage_valid_tags(cache_obj):
+    return sum(
+        1
+        for blocks in cache_obj.values()
+        for block in blocks
+        if block.get("valid") == 1
+    )
+
+
+def mirage_valid_data(cache_obj):
+    return sum(
+        1
+        for entry in cache_obj.data_store
+        if entry != -1 and entry[1] == "valid"
+    )
+
+
+def mirage_tag_entries(cache_obj):
+    return sum(len(blocks) for blocks in cache_obj.values())
+
+
+def check_mirage_actual_geometry():
+    _, _, wrapper_mod = import_design_modules(MIRAGE_DESIGN)
+    print("\nMIRAGE geometry:")
+    print("Banks | Data blocks/bank | Sets/skew/bank | Tag ways | Skews | Total tags")
+    for banks in (1, 2, 4, 8, 16):
+        geom = get_mirage_geometry(banks)
+        wrapper = make_mirage_wrapper(wrapper_mod, banks)
+        aggregate_data = 0
+        aggregate_tags = 0
+        for bank_id, bank_cache in wrapper.region_caches.items():
+            assert len(bank_cache.data_store) == geom["data_blocks_per_bank"]
+            assert len(bank_cache) == geom["sets_per_skew_per_bank"] * MIRAGE_PARTITIONS
+            assert mirage_tag_entries(bank_cache) == (
+                geom["tag_blocks_per_skew_per_bank"] * MIRAGE_PARTITIONS
+            )
+            for blocks in bank_cache.values():
+                assert len(blocks) == MIRAGE_TAG_WAYS, (banks, bank_id)
+            aggregate_data += len(bank_cache.data_store)
+            aggregate_tags += mirage_tag_entries(bank_cache)
+
+        assert aggregate_data == MIRAGE_GLOBAL_DATA_BLOCKS
+        assert aggregate_tags == MIRAGE_GLOBAL_TAG_ENTRIES
+        assert aggregate_tags / aggregate_data == 1.75
+        print(
+            f"{banks} | {geom['data_blocks_per_bank']} | "
+            f"{geom['sets_per_skew_per_bank']} | {MIRAGE_TAG_WAYS} | "
+            f"{MIRAGE_PARTITIONS} | {aggregate_tags}"
+        )
+    print("MIRAGE actual geometry OK")
+
+
+def check_mirage_index_range_and_encryption():
+    ref_mod = import_design_module(MIRAGE_DESIGN, "reference")
+    bin_mod = sys.modules["bin_addr"]
+    original_present = bin_mod.Present
+    calls = {"count": 0}
+
+    class CountingPresent:
+        def __init__(self, key):
+            self.impl = original_present(key)
+
+        def encrypt(self, plaintext):
+            calls["count"] += 1
+            return self.impl.encrypt(plaintext)
+
+    bin_mod.Present = CountingPresent
+    try:
+        for banks in (1, 2, 4, 8, 16):
+            geom = get_mirage_geometry(banks)
+            before = calls["count"]
+            refs = []
+            for block in range(16):
+                word_address = block * NUM_WORDS_PER_BLOCK
+                refs.append(
+                    make_mirage_reference(
+                        ref_mod,
+                        word_address,
+                        banks,
+                        get_bank_id(word_address, banks, NUM_WORDS_PER_BLOCK),
+                    )
+                )
+            for ref in refs:
+                assert isinstance(ref.index, tuple)
+                assert len(ref.index) == MIRAGE_PARTITIONS
+                for index in ref.index:
+                    assert 0 <= int(index, 2) < geom["sets_per_skew_per_bank"]
+
+                tag_bits = NUM_ADDR_BITS - geom["global_index_bits"] - int(
+                    math.log2(NUM_WORDS_PER_BLOCK)
+                )
+                assert ref.tag == ref.bin_addr.get_tag(tag_bits)
+
+            encrypts = calls["count"] - before
+            assert encrypts == 2 * len(refs), (banks, encrypts)
+    finally:
+        bin_mod.Present = original_present
+    print("MIRAGE encrypted bank-local indexes OK")
+
+
+def check_mirage_pointer_locality(bank_cache, selected_bank, num_index_bits):
+    valid_entries = []
+    for blocks in bank_cache.values():
+        for block in blocks:
+            if block.get("valid") == 1:
+                valid_entries.append(block)
+    assert len(valid_entries) == 1, (selected_bank, len(valid_entries))
+    block = valid_entries[0]
+    fptr = block["fptr"]
+    assert isinstance(fptr, int), (selected_bank, fptr)
+    assert 0 <= fptr < len(bank_cache.data_store), (selected_bank, fptr)
+    data_entry = bank_cache.data_store[fptr]
+    assert data_entry != -1
+    assert data_entry[1] == "valid"
+
+    rptr_entry = data_entry[0][0:(num_index_bits + 1)]
+    rptr_way = int(data_entry[0][(num_index_bits + 1):])
+    assert rptr_entry in bank_cache, (selected_bank, rptr_entry)
+    assert 0 <= rptr_way < MIRAGE_TAG_WAYS, (selected_bank, rptr_way)
+    assert bank_cache[rptr_entry][rptr_way]["fptr"] == fptr
+
+
+def check_mirage_bank_isolation_and_pointers():
+    ref_mod, _, wrapper_mod = import_design_modules(MIRAGE_DESIGN)
+    banks = 2
+    for target_bank in (0, 1):
+        geom = get_mirage_geometry(banks)
+        random.seed(500 + target_bank)
+        wrapper = make_mirage_wrapper(wrapper_mod, banks)
+        word_address = target_bank * NUM_WORDS_PER_BLOCK
+        ref = make_mirage_reference(ref_mod, word_address, banks, target_bank)
+        wrapper.read_refs_explicit(NUM_WORDS_PER_BLOCK, "rand", [ref], strict_region=True)
+        assert ref.cache_status.name == "miss"
+        assert ref.region == target_bank
+
+        ref_again = make_mirage_reference(ref_mod, word_address, banks, target_bank)
+        wrapper.read_refs_explicit(
+            NUM_WORDS_PER_BLOCK, "rand", [ref_again], strict_region=True
+        )
+        assert ref_again.cache_status.name == "hit"
+        assert ref_again.region == target_bank
+
+        other_bank = 1 - target_bank
+        assert mirage_valid_tags(wrapper.region_caches[target_bank]) == 1
+        assert mirage_valid_data(wrapper.region_caches[target_bank]) == 1
+        assert mirage_valid_tags(wrapper.region_caches[other_bank]) == 0
+        assert mirage_valid_data(wrapper.region_caches[other_bank]) == 0
+        check_mirage_pointer_locality(
+            wrapper.region_caches[target_bank], target_bank, geom["local_index_bits"]
+        )
+
+        invalid_ref = make_mirage_reference(ref_mod, word_address, banks, target_bank)
+        invalid_ref.target_region = banks
+        try:
+            wrapper.read_refs_explicit(
+                NUM_WORDS_PER_BLOCK, "rand", [invalid_ref], strict_region=True
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("MIRAGE invalid bank did not raise")
+
+        try:
+            wrapper.read_refs_explicit(
+                NUM_WORDS_PER_BLOCK, "rand", [ref_again], strict_region=False
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("MIRAGE cross-bank probing did not raise")
+    print("MIRAGE bank isolation and pointer locality OK")
+
+
+def check_mirage_one_bank_equivalence():
+    ref_mod, cache_mod, wrapper_mod = import_design_modules(MIRAGE_DESIGN)
+    geom = get_mirage_geometry(1)
+    offset_bits = int(math.log2(NUM_WORDS_PER_BLOCK))
+    tag_bits = NUM_ADDR_BITS - geom["global_index_bits"] - offset_bits
+    word_addresses = [0, 8, 16, 24, 8192 * 8, 8193 * 8, 20000 * 8, 30000 * 8]
+
+    def refs():
+        return [
+            ref_mod.Reference(
+                word_address,
+                NUM_ADDR_BITS,
+                offset_bits,
+                geom["local_index_bits"],
+                tag_bits,
+                MIRAGE_PARTITIONS,
+                geom["tag_blocks_per_skew_per_bank"],
+                target_region=0,
+            )
+            for word_address in word_addresses
+        ]
+
+    direct_refs = refs()
+    wrapper_refs = refs()
+    assert [r.index for r in direct_refs] == [r.index for r in wrapper_refs]
+    assert [r.tag for r in direct_refs] == [r.tag for r in wrapper_refs]
+
+    random.seed(777)
+    direct_cache = cache_mod.Cache(
+        num_data_blocks=geom["data_blocks_per_bank"],
+        num_sets_per_skew=geom["sets_per_skew_per_bank"],
+        num_index_bits=geom["local_index_bits"],
+        num_partitions=MIRAGE_PARTITIONS,
+        num_tag_blocks_per_skew=geom["tag_blocks_per_skew_per_bank"],
+        num_addr_bits=NUM_ADDR_BITS,
+        num_offset_bits=offset_bits,
+        num_total_ways=MIRAGE_TAG_WAYS,
+    )
+    direct_cache.read_refs(
+        MIRAGE_TAG_WAYS,
+        MIRAGE_PARTITIONS,
+        "rand",
+        NUM_WORDS_PER_BLOCK,
+        geom["local_index_bits"],
+        direct_refs,
+    )
+
+    random.seed(777)
+    wrapper = make_mirage_wrapper(wrapper_mod, 1)
+    wrapper.read_refs_explicit(
+        NUM_WORDS_PER_BLOCK, "rand", wrapper_refs, strict_region=True
+    )
+
+    assert len(wrapper.region_caches) == 1
+    assert len(wrapper.region_caches[0].data_store) == geom["data_blocks_per_bank"]
+    assert mirage_tag_entries(wrapper.region_caches[0]) == MIRAGE_GLOBAL_TAG_ENTRIES
+    assert [r.cache_status.name for r in direct_refs] == [
+        r.cache_status.name for r in wrapper_refs
+    ]
+
+    direct_again = refs()
+    wrapper_again = refs()
+    random.seed(778)
+    direct_cache.read_refs(
+        MIRAGE_TAG_WAYS,
+        MIRAGE_PARTITIONS,
+        "rand",
+        NUM_WORDS_PER_BLOCK,
+        geom["local_index_bits"],
+        direct_again,
+    )
+    random.seed(778)
+    wrapper.read_refs_explicit(
+        NUM_WORDS_PER_BLOCK, "rand", wrapper_again, strict_region=True
+    )
+    assert [r.cache_status.name for r in direct_again] == [
+        r.cache_status.name for r in wrapper_again
+    ]
+    assert all(r.cache_status.name == "hit" for r in wrapper_again)
+    print("MIRAGE one-bank wrapper equivalence OK")
+
+
+def check_mirage_error_handling():
+    try:
+        get_mirage_geometry(3)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("MIRAGE non-power-of-two bank count did not raise")
+    print("MIRAGE error handling OK")
+
+
 def main():
     print_geometry()
     check_actual_wrapper_capacity()
@@ -404,6 +748,11 @@ def main():
     check_bank_isolation_for_design("Ceaser-s_cache_occupancy", "CEASER-S")
     check_bank_isolation_for_design("ScatterCache_cache_occupancy", "ScatterCache")
     check_one_bank_equivalence()
+    check_mirage_actual_geometry()
+    check_mirage_index_range_and_encryption()
+    check_mirage_bank_isolation_and_pointers()
+    check_mirage_one_bank_equivalence()
+    check_mirage_error_handling()
     print("\nS-NUCA validation passed")
 
 

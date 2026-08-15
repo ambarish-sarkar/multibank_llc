@@ -5,7 +5,13 @@ Simulator for occupancy-based covert channel with Multi-BANK/REGION Mirage cache
 """
 
 import math
+import os
+import sys
 from collections import OrderedDict
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from common import get_bank_id as get_snuca_bank_id
+from common import require_power_of_two
 
 from hybrid_wrapper_cache import HybridWrapperCache
 from bin_addr import BinaryAddress
@@ -21,11 +27,65 @@ DEFAULT_TABLE_WIDTH = 180
 class Simulator(object):
 
     def get_bank_id(self, address, num_banks, num_words_per_block):
-        """Determine which bank an address maps to based on block offset."""
-        BYTES_PER_WORD = 8
-        bytes_per_block = num_words_per_block * BYTES_PER_WORD
-        block_number = address // bytes_per_block
-        return block_number % num_banks
+        return get_snuca_bank_id(address, num_banks, num_words_per_block)
+
+    def get_mirage_snuca_geometry(
+        self,
+        cache_size,
+        num_words_per_block,
+        num_blocks_per_set,
+        num_additional_tags,
+        num_partitions,
+        num_banks,
+    ):
+        require_power_of_two(num_words_per_block, "num_words_per_block")
+        require_power_of_two(num_blocks_per_set, "num_blocks_per_set")
+        require_power_of_two(num_banks, "num_banks")
+
+        global_data_blocks = (cache_size // 8) // num_words_per_block
+        if global_data_blocks <= 0:
+            raise ValueError("MIRAGE global data blocks must be non-zero")
+        if global_data_blocks % num_banks != 0:
+            raise ValueError("MIRAGE data blocks must be divisible by num_banks")
+        if global_data_blocks % num_partitions != 0:
+            raise ValueError("MIRAGE data blocks must be divisible by skews")
+
+        data_blocks_per_bank = global_data_blocks // num_banks
+        tag_ways = num_blocks_per_set + num_additional_tags
+        global_sets_per_skew_num = global_data_blocks // num_partitions
+        if global_sets_per_skew_num % num_blocks_per_set != 0:
+            raise ValueError("MIRAGE data blocks/skew must be divisible by data ways")
+        global_sets_per_skew = global_sets_per_skew_num // num_blocks_per_set
+        require_power_of_two(global_sets_per_skew, "global_sets_per_skew")
+        if global_sets_per_skew % num_banks != 0:
+            raise ValueError("MIRAGE sets/skew must be divisible by num_banks")
+
+        sets_per_skew_per_bank = global_sets_per_skew // num_banks
+        require_power_of_two(sets_per_skew_per_bank, "sets_per_skew_per_bank")
+        if sets_per_skew_per_bank <= 0:
+            raise ValueError("MIRAGE bank-local sets/skew must be non-zero")
+
+        global_index_bits = int(math.log2(global_sets_per_skew))
+        local_index_bits = int(math.log2(sets_per_skew_per_bank))
+        tag_blocks_per_skew_per_bank = sets_per_skew_per_bank * tag_ways
+        total_data_blocks = data_blocks_per_bank * num_banks
+        total_tag_entries = (
+            num_banks * num_partitions * tag_blocks_per_skew_per_bank
+        )
+
+        return {
+            "global_data_blocks": global_data_blocks,
+            "data_blocks_per_bank": data_blocks_per_bank,
+            "global_sets_per_skew": global_sets_per_skew,
+            "sets_per_skew_per_bank": sets_per_skew_per_bank,
+            "global_index_bits": global_index_bits,
+            "local_index_bits": local_index_bits,
+            "tag_ways": tag_ways,
+            "tag_blocks_per_skew_per_bank": tag_blocks_per_skew_per_bank,
+            "total_data_blocks": total_data_blocks,
+            "total_tag_entries": total_tag_entries,
+            "tag_data_ratio": total_tag_entries / total_data_blocks,
+        }
 
     def filter_addresses_by_banks(self, addresses, target_banks, num_banks, num_words_per_block):
         """Filter addresses to only those that map to target banks."""
@@ -74,66 +134,51 @@ class Simulator(object):
         """
 
         # -------- geometry/derived -----------
-        num_data_blocks = (cache_size // 8) // num_words_per_block
-        num_sets_per_skew = (num_data_blocks // num_partitions) // num_blocks_per_set
-        num_tag_blocks_per_skew = num_sets_per_skew * (num_blocks_per_set + num_additional_tags)
-        num_total_ways = num_blocks_per_set + num_additional_tags
+        geom = self.get_mirage_snuca_geometry(
+            cache_size,
+            num_words_per_block,
+            num_blocks_per_set,
+            num_additional_tags,
+            num_partitions,
+            num_banks,
+        )
+        num_data_blocks = geom["data_blocks_per_bank"]
+        num_sets_per_skew = geom["sets_per_skew_per_bank"]
+        num_tag_blocks_per_skew = geom["tag_blocks_per_skew_per_bank"]
+        num_total_ways = geom["tag_ways"]
 
         all_addrs = receiver_addresses + sender_addresses
         num_addr_bits = max(num_addr_bits, int(math.log2(max(all_addrs))) + 1)
 
         num_offset_bits = int(math.log2(num_words_per_block))
-        num_index_bits = int(math.log2(num_sets_per_skew))
-        num_tag_bits = num_addr_bits - num_index_bits - num_offset_bits
+        num_index_bits = geom["local_index_bits"]
+        # Keep MIRAGE tag identity tied to the original single-bank index field.
+        num_tag_bits = num_addr_bits - geom["global_index_bits"] - num_offset_bits
 
         # -------- Generic N-region simulation -----------
         # Determine number of regions and how to distribute addresses
-        if num_banks > 1:
-            # Multi-bank mode: each bank is a region
-            num_regions = num_banks
-            
-            # Determine which banks (regions) to attack
-            if attack_mode in ('region0', 'region1'):
-                target_regions = [0]  # Single region attack
-                print(f"Multi-bank: Single-region attack on bank/region 0")
-            else:  # simultaneous
-                target_regions = list(range(banks_to_attack))
-                print(f"Multi-bank: Simultaneous attack on {banks_to_attack} banks/regions")
-            
-            # Group addresses by bank (which maps to region)
-            region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
-            for addr in receiver_addresses:
-                bid = self.get_bank_id(addr, num_banks, num_words_per_block)
-                if bid in region_addrs:
-                    region_addrs[bid]['recv'].append(addr)
-            for addr in sender_addresses:
-                bid = self.get_bank_id(addr, num_banks, num_words_per_block)
-                if bid in region_addrs:
-                    region_addrs[bid]['send'].append(addr)
+        num_regions = num_banks
+        if attack_mode == 'region1' and num_banks > 1:
+            target_regions = [1]
+            print(f"S-NUCA Mirage: single-bank attack on bank 1")
+        elif attack_mode in ('region0', 'region1'):
+            target_regions = [0]
+            print(f"S-NUCA Mirage: single-bank attack on bank 0")
         else:
-            # Hybrid mode: 2 regions with address interleaving
-            num_regions = 2
-            
-            if attack_mode == 'region0':
-                target_regions = [0]
-            elif attack_mode == 'region1':
-                target_regions = [1]
-            else:  # simultaneous
-                target_regions = [0, 1]
-            
-            # Distribute addresses across regions (interleave for simultaneous)
-            region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
-            if len(target_regions) == 1:
-                # Single region: all addresses go there
-                r = target_regions[0]
-                region_addrs[r]['recv'] = receiver_addresses
-                region_addrs[r]['send'] = sender_addresses
-            else:
-                # Simultaneous: alternate addresses between regions
-                for i, addr in enumerate(receiver_addresses):
-                    region_addrs[i % 2]['recv'].append(addr)
-                for i, addr in enumerate(sender_addresses):
-                    region_addrs[i % 2]['send'].append(addr)
+            if banks_to_attack > num_banks:
+                raise ValueError("banks_to_attack cannot exceed num_banks")
+            target_regions = list(range(banks_to_attack))
+            print(f"S-NUCA Mirage: simultaneous attack on {banks_to_attack} banks")
+
+        region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
+        for addr in receiver_addresses:
+            bid = self.get_bank_id(addr, num_banks, num_words_per_block)
+            if bid in region_addrs:
+                region_addrs[bid]['recv'].append(addr)
+        for addr in sender_addresses:
+            bid = self.get_bank_id(addr, num_banks, num_words_per_block)
+            if bid in region_addrs:
+                region_addrs[bid]['send'].append(addr)
         
         # Create N-region cache
         cache = HybridWrapperCache(
@@ -160,14 +205,14 @@ class Simulator(object):
                 refs = self.get_addr_refs(addrs['recv'], num_addr_bits, num_offset_bits, 
                                          num_index_bits, num_tag_bits, num_partitions, num_tag_blocks_per_skew)
                 for ref in refs:
-                    ref.target_region = i  # Use index in target_regions
+                    ref.target_region = region_id
                 recv_refs_by_region[i] = refs
             
             if addrs['send']:
                 refs = self.get_addr_refs(addrs['send'], num_addr_bits, num_offset_bits,
                                          num_index_bits, num_tag_bits, num_partitions, num_tag_blocks_per_skew)
                 for ref in refs:
-                    ref.target_region = i
+                    ref.target_region = region_id
                 send_refs_by_region[i] = refs
         
         # Run simulation: receiver -> sender -> receiver
@@ -191,7 +236,7 @@ class Simulator(object):
                 refs = self.get_addr_refs(addrs, num_addr_bits, num_offset_bits,
                                          num_index_bits, num_tag_bits, num_partitions, num_tag_blocks_per_skew)
                 for ref in refs:
-                    ref.target_region = i
+                    ref.target_region = target_regions[i]
                 cache.read_refs_explicit(num_words_per_block, replacement_policy, refs, strict_region=strict)
                 recv_re_by_region.append(refs)
             else:

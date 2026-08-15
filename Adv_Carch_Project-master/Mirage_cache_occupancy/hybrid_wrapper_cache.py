@@ -1,42 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Multi-Region Hybrid Cache Wrapper for Mirage Cache
+"""S-NUCA bank wrapper for Mirage Cache.
 
-- Supports N independent Mirage Cache instances (regions)
-- For num_regions=2: uses region_split_ratio to allocate data blocks (backward compatible)
-- For num_regions>2: equal allocation of data blocks per region
-- Maintains identical tag geometry (sets/ways/index bits) across all regions
-- Each region has independent data store and tag store
+Each bank is an independent MIRAGE cache with bank-local data blocks and
+bank-local tag sets. Tag ways and skew count are preserved; region_split_ratio
+is accepted for old callers but ignored in S-NUCA mode.
 """
 
 from reference import ReferenceCacheStatus
 from cache import Cache
 
 
-def _round_to_multiple(x, m):
-    if m <= 0: return int(round(x))
-    return int(round(x / m)) * m
-
-
 class HybridWrapperCache:
-    """
-    Wraps N Mirage Cache instances and splits the data store between them.
-    
-    For num_regions=2:
-        Region 0: SRAM-like (fast), fraction = region_split_ratio
-        Region 1: NVM-like (slow), fraction = 1 - region_split_ratio
-    
-    For num_regions>2:
-        Equal split across all regions
-    """
-
     def __init__(self,
                  cache_class=Cache,
                  num_regions=2,
                  region_split_ratio=0.3,
                  # geometry derived by Simulator:
-                 num_data_blocks=None,            # total data blocks (all regions)
+                 num_data_blocks=None,
                  num_sets_per_skew=None,
                  num_index_bits=None,
                  num_partitions=None,
@@ -47,109 +28,87 @@ class HybridWrapperCache:
         
         self.num_regions = int(num_regions)
         self.region_split_ratio = float(region_split_ratio)
-        
-        if not (0.0 <= self.region_split_ratio <= 1.0):
-            raise ValueError("region_split_ratio must be in [0.0, 1.0]")
+        if any(v is None for v in (
+            num_data_blocks,
+            num_sets_per_skew,
+            num_index_bits,
+            num_partitions,
+            num_tag_blocks_per_skew,
+            num_addr_bits,
+            num_offset_bits,
+            num_total_ways,
+        )):
+            raise ValueError("All MIRAGE bank geometry params must be provided.")
 
-        total_db = int(num_data_blocks)
-        
-        # Compute per-region data block allocation
-        self._data_blocks_per_region = self._compute_data_block_allocation(total_db)
-        
-        # Determine if single region mode
-        active_regions = [i for i, db in enumerate(self._data_blocks_per_region) if db > 0]
-        self.single_region_mode = len(active_regions) == 1
-        self.active_region = active_regions[0] if self.single_region_mode else None
+        self._num_data_blocks = int(num_data_blocks)
+        self._num_sets_per_skew = int(num_sets_per_skew)
+        self._num_index_bits = int(num_index_bits)
+        self._num_partitions = int(num_partitions)
+        self._num_tag_blocks_per_skew = int(num_tag_blocks_per_skew)
+        self._num_total_ways = int(num_total_ways)
 
-        print(f"Multi-region Mirage Cache Configuration:")
-        print(f"  num_regions={self.num_regions}, total data blocks={total_db}")
-        print(f"  data_blocks_per_region={self._data_blocks_per_region}")
-        print(f"  Tag geometry: sets/skew={num_sets_per_skew}, ways/set={num_total_ways}, partitions={num_partitions}")
+        if self._num_data_blocks <= 0 or self._num_sets_per_skew <= 0:
+            raise ValueError("MIRAGE bank-local geometry must be non-zero")
+        if self._num_tag_blocks_per_skew != self._num_sets_per_skew * self._num_total_ways:
+            raise ValueError("MIRAGE tag blocks/skew must equal sets/skew * tag ways")
+
+        self._data_blocks_per_bank = [self._num_data_blocks] * self.num_regions
+        self.single_region_mode = self.num_regions == 1
+        self.active_region = 0 if self.single_region_mode else None
+
+        print(f"S-NUCA Mirage Cache Configuration:")
+        print(f"  banks={self.num_regions}, data_blocks/bank={self._num_data_blocks}")
+        print(f"  sets/skew/bank={self._num_sets_per_skew}, index_bits={self._num_index_bits}")
+        print(f"  skews={self._num_partitions}, tag_ways={self._num_total_ways}")
         if self.single_region_mode:
-            print(f"  Single region mode: Only region {self.active_region} is active")
+            print(f"  One-bank mode: bank {self.active_region}")
 
         # Create N region caches
         self.region_caches = {}
         for region_id in range(self.num_regions):
-            db = self._data_blocks_per_region[region_id]
-            if db > 0:
-                self.region_caches[region_id] = cache_class(
-                    tag_store=None,
-                    num_data_blocks=db,
-                    num_sets_per_skew=num_sets_per_skew,
-                    num_index_bits=num_index_bits,
-                    num_partitions=num_partitions,
-                    num_tag_blocks_per_skew=num_tag_blocks_per_skew,
-                    num_addr_bits=num_addr_bits,
-                    num_offset_bits=num_offset_bits,
-                    num_total_ways=num_total_ways
-                )
+            self.region_caches[region_id] = cache_class(
+                tag_store=None,
+                num_data_blocks=self._num_data_blocks,
+                num_sets_per_skew=self._num_sets_per_skew,
+                num_index_bits=self._num_index_bits,
+                num_partitions=self._num_partitions,
+                num_tag_blocks_per_skew=self._num_tag_blocks_per_skew,
+                num_addr_bits=num_addr_bits,
+                num_offset_bits=num_offset_bits,
+                num_total_ways=self._num_total_ways
+            )
 
         # Stats: track per-region
         self.region_accesses = [0] * self.num_regions
         self.region_hits = [0] * self.num_regions
 
-        # Save geometry for calls
-        self._num_partitions = num_partitions
-        self._num_total_ways = num_total_ways
-        self._num_index_bits = num_index_bits
-
-    def _compute_data_block_allocation(self, total_db):
-        """Compute per-region data block allocation based on num_regions and split ratio."""
-        if self.num_regions == 2:
-            # Backward compatible: use region_split_ratio
-            db0 = int(round(total_db * self.region_split_ratio))
-            db1 = total_db - db0
-            
-            # Ensure at least one active region if split ratio is in (0,1)
-            if 0.0 < self.region_split_ratio < 1.0:
-                if db0 == 0:
-                    db0 = 1
-                    db1 = total_db - db0
-                if db1 == 0 and total_db >= 1:
-                    db1 = 1
-                    db0 = total_db - db1
-            
-            return [db0, db1]
-        else:
-            # Multi-region: equal split
-            db_per_region = max(1, total_db // self.num_regions)
-            allocation = [db_per_region] * self.num_regions
-            
-            # Distribute remainder data blocks to first regions
-            remainder = total_db - (db_per_region * self.num_regions)
-            for i in range(remainder):
-                allocation[i] += 1
-            
-            return allocation
-
     # ----- helpers -----
     def smaller_region_id(self):
-        """ID of the smallest region (by data block count)."""
-        min_db = min(db for db in self._data_blocks_per_region if db > 0)
-        return next(i for i, db in enumerate(self._data_blocks_per_region) if db == min_db)
+        """ID of the smallest region (all S-NUCA banks are equal)."""
+        return 0
 
     def _is_hit_in_region(self, region_id, addr_index, addr_tag):
+        if region_id is None or region_id < 0 or region_id >= self.num_regions:
+            raise ValueError(f"Invalid S-NUCA bank: {region_id}")
         cache_instance = self.region_caches.get(region_id)
         if cache_instance is None:
-            return False
+            raise ValueError(f"S-NUCA bank {region_id} is not available")
         return cache_instance.is_hit(addr_index, addr_tag, self._num_partitions)
 
     def is_hit(self, addr_index, addr_tag, target_region=None):
-        """Return (bool, region_id or None)."""
-        if target_region is not None:
-            if self._is_hit_in_region(target_region, addr_index, addr_tag):
-                return True, target_region
-            return False, None
-        for rid, inst in self.region_caches.items():
-            if inst.is_hit(addr_index, addr_tag, self._num_partitions):
-                return True, rid
+        """Probe only the bank selected by S-NUCA address decomposition."""
+        if target_region is None:
+            raise ValueError("S-NUCA lookup requires an explicit target bank")
+        if self._is_hit_in_region(target_region, addr_index, addr_tag):
+            return True, target_region
         return False, None
 
     def _allocate_in_region(self, region_id, replacement_policy, addr_index, new_entry):
+        if region_id is None or region_id < 0 or region_id >= self.num_regions:
+            raise ValueError(f"Invalid S-NUCA bank: {region_id}")
         cache_instance = self.region_caches.get(region_id)
         if cache_instance is None:
-            raise ValueError(f"Region {region_id} is not available")
+            raise ValueError(f"S-NUCA bank {region_id} is not available")
 
         # Mirage Cache.set_block signature:
         # set_block(replacement_policy, num_tags_per_set, num_partition, addr_index, new_entry, count_ref_index, num_index_bits)
@@ -164,25 +123,20 @@ class HybridWrapperCache:
         )
 
     def read_refs_explicit(self, num_words_per_block, replacement_policy, refs, strict_region=True):
-        """
-        Each ref may have ref.target_region in [0..N-1].
-        If strict_region=True, only probe/allocate in the target region (no cross-region hits).
-        If False, probe target first, then other regions before allocating.
-        """
+        """Probe and allocate only in the address-selected S-NUCA bank."""
+        if not strict_region:
+            raise ValueError("S-NUCA mode forbids cross-bank probing")
+
         for ref in refs:
             # Choose region (must be present)
             target_region = getattr(ref, 'target_region', None)
-            if target_region is None or target_region >= self.num_regions or target_region not in self.region_caches:
-                # fallback to first available region
-                target_region = next(iter(self.region_caches.keys()), 0)
+            if target_region is None or target_region < 0 or target_region >= self.num_regions:
+                raise ValueError(f"Invalid S-NUCA bank: {target_region}")
+            if target_region not in self.region_caches:
+                raise ValueError(f"S-NUCA bank {target_region} is not available")
 
-            if strict_region:
-                hit = self._is_hit_in_region(target_region, ref.index, ref.tag)
-                hit_region = target_region if hit else None
-            else:
-                hit, hit_region = self.is_hit(ref.index, ref.tag, target_region)
-                if not hit:
-                    hit, hit_region = self.is_hit(ref.index, ref.tag, None)
+            hit = self._is_hit_in_region(target_region, ref.index, ref.tag)
+            hit_region = target_region if hit else None
 
             if hit:
                 ref.cache_status = ReferenceCacheStatus.hit
