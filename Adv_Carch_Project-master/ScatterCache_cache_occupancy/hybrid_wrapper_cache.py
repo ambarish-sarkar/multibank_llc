@@ -72,26 +72,26 @@ class HybridWrapperCache:
 
     # ---- probes ----
     def _is_hit_in_region(self, region_id, ref):
-        if region_id >= self.num_regions or self.region_caches[region_id] is None:
-            return False
+        if region_id is None or region_id < 0 or region_id >= self.num_regions:
+            raise ValueError(f"Invalid S-NUCA bank: {region_id}")
+        if self.region_caches[region_id] is None:
+            raise ValueError(f"S-NUCA bank {region_id} is not available")
         cache = self.region_caches[region_id]
         return cache.is_hit(ref.partition, ref.index, ref.tag, self._num_partitions)
 
     def is_hit(self, ref, target_region=None):
-        """Return (bool, region_id or None)."""
-        if target_region is not None:
-            hit = self._is_hit_in_region(target_region, ref)
-            return (hit, target_region) if hit else (False, None)
-        
-        for rid in range(self.num_regions):
-            if self._is_hit_in_region(rid, ref):
-                return True, rid
-        return False, None
+        """Probe only the bank selected by S-NUCA address decomposition."""
+        if target_region is None:
+            raise ValueError("S-NUCA lookup requires an explicit target bank")
+        hit = self._is_hit_in_region(target_region, ref)
+        return (hit, target_region) if hit else (False, None)
 
     # ---- allocate within a region ----
     def _allocate_in_region(self, region_id, replacement_policy, ref, num_words_per_block):
-        if region_id >= self.num_regions or self.region_caches[region_id] is None:
-            raise ValueError(f"Region {region_id} is not available")
+        if region_id is None or region_id < 0 or region_id >= self.num_regions:
+            raise ValueError(f"Invalid S-NUCA bank: {region_id}")
+        if self.region_caches[region_id] is None:
+            raise ValueError(f"S-NUCA bank {region_id} is not available")
         
         cache = self.region_caches[region_id]
         bank_ways = self._ways_per_bank[region_id]
@@ -107,28 +107,22 @@ class HybridWrapperCache:
 
     # ---- main read ----
     def read_refs_explicit(self, num_words_per_block, replacement_policy, refs, strict_region=True):
-        """
-        Each ref may carry ref.target_region in [0..N-1].
-        If strict_region=True, probe/allocate only in target region.
-        If False, probe target first, then other regions before allocating.
-        """
+        """Probe and allocate only in the address-selected S-NUCA bank."""
+        if not strict_region:
+            raise ValueError("S-NUCA mode forbids cross-bank probing")
+
         for ref in refs:
             # Determine target region
             target_region = getattr(ref, 'target_region', None)
-            if target_region is None or target_region >= self.num_regions or self.region_caches[target_region] is None:
-                # Default to first active region
-                target_region = next((i for i in range(self.num_regions) if self.region_caches[i] is not None), 0)
+            if target_region is None or target_region < 0 or target_region >= self.num_regions:
+                raise ValueError(f"Invalid S-NUCA bank: {target_region}")
+            if self.region_caches[target_region] is None:
+                raise ValueError(f"S-NUCA bank {target_region} is not available")
 
             # Probe
             hit_region = None
             if self._is_hit_in_region(target_region, ref):
                 hit_region = target_region
-            elif not strict_region:
-                # Try other regions
-                for rid in range(self.num_regions):
-                    if rid != target_region and self._is_hit_in_region(rid, ref):
-                        hit_region = rid
-                        break
 
             if hit_region is not None:
                 ref.cache_status = ReferenceCacheStatus.hit
