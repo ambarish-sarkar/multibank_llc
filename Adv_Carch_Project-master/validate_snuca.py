@@ -593,6 +593,42 @@ def check_mirage_pointer_locality(bank_cache, selected_bank, num_index_bits):
     assert bank_cache[rptr_entry][rptr_way]["fptr"] == fptr
 
 
+def check_mirage_all_pointer_consistency(bank_cache, geom):
+    seen_fptrs = set()
+    for tag_key, blocks in bank_cache.items():
+        assert len(tag_key) == geom["local_index_bits"] + 1
+        skew = int(tag_key[0])
+        tag_index = tag_key[1:]
+        assert 0 <= skew < MIRAGE_PARTITIONS
+        assert 0 <= int(tag_index, 2) < geom["sets_per_skew_per_bank"]
+        for way, block in enumerate(blocks):
+            if block.get("valid") != 1:
+                continue
+            fptr = block["fptr"]
+            assert isinstance(fptr, int), (tag_key, way, fptr)
+            assert 0 <= fptr < len(bank_cache.data_store), (tag_key, way, fptr)
+            assert fptr not in seen_fptrs, (tag_key, way, fptr)
+            seen_fptrs.add(fptr)
+            data_entry = bank_cache.data_store[fptr]
+            assert data_entry != -1, (tag_key, way, fptr)
+            assert data_entry[1] == "valid", (tag_key, way, fptr)
+            rptr_entry = data_entry[0][0:(geom["local_index_bits"] + 1)]
+            rptr_way = int(data_entry[0][(geom["local_index_bits"] + 1):])
+            assert rptr_entry == tag_key, (tag_key, way, rptr_entry)
+            assert rptr_way == way, (tag_key, way, rptr_way)
+
+    for fptr, data_entry in enumerate(bank_cache.data_store):
+        if data_entry == -1 or data_entry[1] != "valid":
+            continue
+        rptr_entry = data_entry[0][0:(geom["local_index_bits"] + 1)]
+        rptr_way = int(data_entry[0][(geom["local_index_bits"] + 1):])
+        assert rptr_entry in bank_cache, (fptr, rptr_entry)
+        assert 0 <= rptr_way < MIRAGE_TAG_WAYS, (fptr, rptr_way)
+        block = bank_cache[rptr_entry][rptr_way]
+        assert block.get("valid") == 1, (fptr, rptr_entry, rptr_way)
+        assert block["fptr"] == fptr, (fptr, rptr_entry, rptr_way)
+
+
 def check_mirage_bank_isolation_and_pointers():
     ref_mod, _, wrapper_mod = import_design_modules(MIRAGE_DESIGN)
     banks = 2
@@ -642,6 +678,117 @@ def check_mirage_bank_isolation_and_pointers():
         else:
             raise AssertionError("MIRAGE cross-bank probing did not raise")
     print("MIRAGE bank isolation and pointer locality OK")
+
+
+def check_mirage_gle_sae_stress():
+    ref_mod, cache_mod, wrapper_mod = import_design_modules(MIRAGE_DESIGN)
+    banks = 2
+    target_bank = 0
+    other_bank = 1
+    geom = get_mirage_geometry(banks)
+    wrapper = make_mirage_wrapper(wrapper_mod, banks)
+    bank_cache = wrapper.region_caches[target_bank]
+
+    fixed_index = "0".zfill(geom["local_index_bits"])
+    tag_shift = geom["global_index_bits"] + int(math.log2(NUM_WORDS_PER_BLOCK))
+    refs = []
+    for tag_value in range((MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS) + 1):
+        word_address = (tag_value << tag_shift) + (target_bank * NUM_WORDS_PER_BLOCK)
+        assert get_bank_id(word_address, banks, NUM_WORDS_PER_BLOCK) == target_bank
+        ref = make_mirage_reference(ref_mod, word_address, banks, target_bank)
+        ref.index = (fixed_index, fixed_index)
+        assert all(0 <= int(index, 2) < geom["sets_per_skew_per_bank"] for index in ref.index)
+        refs.append(ref)
+
+    counters = {"gle": 0, "sae": 0}
+    original_gle = bank_cache.do_random_GLE
+    original_replace = bank_cache.replace_block
+    original_randint = cache_mod.random.randint
+    original_write_eviction_status = cache_mod.writeFile.write_eviction_status
+    data_indices = iter(range(len(refs)))
+
+    def counted_gle(new_tag_index, new_way_index, num_index_bits):
+        counters["gle"] += 1
+        return original_gle(new_tag_index, new_way_index, num_index_bits)
+
+    def counted_replace(
+        blocks,
+        replacement_policy,
+        num_tags_per_set,
+        skew,
+        valid_count,
+        num_partition,
+        addr_index,
+        new_entry,
+        count_ref_index,
+        num_index_bits,
+    ):
+        if valid_count >= num_tags_per_set:
+            counters["sae"] += 1
+        return original_replace(
+            blocks,
+            replacement_policy,
+            num_tags_per_set,
+            skew,
+            valid_count,
+            num_partition,
+            addr_index,
+            new_entry,
+            count_ref_index,
+            num_index_bits,
+        )
+
+    def deterministic_randint(low, high):
+        if low == 0 and high == len(bank_cache.data_store) - 1:
+            return next(data_indices)
+        if low == 0 and high == MIRAGE_TAG_WAYS - 1:
+            return 0
+        return original_randint(low, high)
+
+    bank_cache.do_random_GLE = counted_gle
+    bank_cache.replace_block = counted_replace
+    cache_mod.random.randint = deterministic_randint
+    cache_mod.writeFile.write_eviction_status = staticmethod(lambda: None)
+    try:
+        wrapper.read_refs_explicit(
+            NUM_WORDS_PER_BLOCK, "rand", refs[:1], strict_region=True
+        )
+        assert refs[0].cache_status.name == "miss"
+        assert counters["gle"] == 1
+        assert counters["sae"] == 0
+        assert mirage_valid_tags(wrapper.region_caches[other_bank]) == 0
+        assert mirage_valid_data(wrapper.region_caches[other_bank]) == 0
+        check_mirage_all_pointer_consistency(bank_cache, geom)
+
+        wrapper.read_refs_explicit(
+            NUM_WORDS_PER_BLOCK, "rand", refs[1:MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS],
+            strict_region=True,
+        )
+        assert counters["gle"] == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        assert counters["sae"] == 0
+        assert mirage_valid_tags(bank_cache) == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        assert mirage_valid_data(bank_cache) == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        check_mirage_all_pointer_consistency(bank_cache, geom)
+
+        wrapper.read_refs_explicit(
+            NUM_WORDS_PER_BLOCK, "rand", refs[MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS:],
+            strict_region=True,
+        )
+        assert refs[-1].cache_status.name == "miss"
+        assert counters["sae"] == 1
+        assert counters["gle"] == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        assert mirage_valid_tags(bank_cache) == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        assert mirage_valid_data(bank_cache) == MIRAGE_TAG_WAYS * MIRAGE_PARTITIONS
+        assert mirage_valid_tags(wrapper.region_caches[other_bank]) == 0
+        assert mirage_valid_data(wrapper.region_caches[other_bank]) == 0
+        check_mirage_all_pointer_consistency(bank_cache, geom)
+    finally:
+        bank_cache.do_random_GLE = original_gle
+        bank_cache.replace_block = original_replace
+        cache_mod.random.randint = original_randint
+        cache_mod.writeFile.write_eviction_status = original_write_eviction_status
+
+    print("MIRAGE GLE/SAE stress behavior OK")
 
 
 def check_mirage_one_bank_equivalence():
@@ -751,6 +898,7 @@ def main():
     check_mirage_actual_geometry()
     check_mirage_index_range_and_encryption()
     check_mirage_bank_isolation_and_pointers()
+    check_mirage_gle_sae_stress()
     check_mirage_one_bank_equivalence()
     check_mirage_error_handling()
     print("\nS-NUCA validation passed")
