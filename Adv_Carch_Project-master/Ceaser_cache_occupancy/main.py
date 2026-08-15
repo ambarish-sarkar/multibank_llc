@@ -33,15 +33,16 @@ def run_experiment(receiver_addrs, sender_addrs, cli_args):
 
     # For simultaneous mode: return list of misses for each region
     if cli_args.attack_mode == 'simultaneous':
-        # Determine how many regions are active
-        num_regions = cli_args.banks_to_attack if cli_args.num_banks > 1 else 2
+        num_regions = cli_args.banks_to_attack
         return [count_misses(timing_by_region.get(f'region{i}', {})) for i in range(num_regions)]
     
     # Single-region modes: return single value
     if cli_args.attack_mode == 'region0':
         return count_misses(timing_by_region.get('region0', {}))
-    else:
+    elif cli_args.num_banks > 1:
         return count_misses(timing_by_region.get('region1', {}))
+    else:
+        return count_misses(timing_by_region.get('region0', {}))
 
 if __name__ == '__main__':
     cli_args = parse_config()
@@ -61,21 +62,16 @@ if __name__ == '__main__':
     print(f"  Number of banks: {cli_args.num_banks}")
     print(f"  Banks to attack: {cli_args.banks_to_attack}")
 
-    # Determine target banks for the attack
-    if cli_args.num_banks > 1:
-        # Multi-bank mode
-        if cli_args.banks_to_attack == 1:
-            # Single bank attack - attack bank 0 by default
-            target_banks = [0]
-            print(f"  Targeting single bank: {target_banks[0]}")
-        elif cli_args.banks_to_attack > 1:  # simultaneous
-            # Attack first N banks
-            target_banks = list(range(cli_args.banks_to_attack))
-            print(f"  Targeting banks: {target_banks}")
+    # Determine target banks for S-NUCA.
+    if cli_args.attack_mode == 'region1' and cli_args.num_banks > 1:
+        target_banks = [1]
+        print(f"  Targeting single bank: {target_banks[0]}")
+    elif cli_args.attack_mode in ('region0', 'region1'):
+        target_banks = [0]
+        print(f"  Targeting single bank: {target_banks[0]}")
     else:
-        # Single bank mode (backward compatible)
-        target_banks = None
-        print(f"  Single bank mode (no bank filtering)")
+        target_banks = list(range(cli_args.banks_to_attack))
+        print(f"  Targeting banks: {target_banks}")
 
     sender_accesses_for_0 = int(total_cache_lines * sender_percent_for_0 / 100)
     sender_accesses_for_1 = int(total_cache_lines * sender_percent_for_1 / 100)

@@ -1,21 +1,11 @@
-"""
-Hybrid Ceaser_s Cache (MULTI-REGION, WAY-SPLIT, no tag duplication per line)
+"""S-NUCA bank wrapper for CEASER-S cache.
 
-- Supports N independent Ceaser_s Cache instances sharing the SAME set/index geometry.
-- For num_regions=2: uses region_split_ratio to allocate ways (backward compatible)
-- For num_regions>2: equal allocation of ways per region (ways_per_region = total_ways / N)
-- Each region has a per-set way budget enforced at allocation time.
-- With strict_region=True in the simulator, a given line is allocated in ONLY one region.
+Each bank is an independent cache with bank-local two-skew indexes and the
+original ways/set. region_split_ratio is accepted for old callers but ignored.
 """
 
-import math
 from reference import ReferenceCacheStatus
 from cache import Cache
-
-
-def _round_to_multiple(x, m):
-    if m <= 0: return int(round(x))
-    return int(round(x / m)) * m
 
 
 class HybridWrapperCache:
@@ -28,14 +18,6 @@ class HybridWrapperCache:
                  num_index_bits=None,
                  num_partitions=None,
                  num_blocks_per_set=None):
-        """
-        Initialize multi-region cache.
-        
-        Args:
-            num_regions: Number of regions (2 for hybrid mode, N for multi-bank)
-            region_split_ratio: Only used when num_regions=2 (hybrid mode)
-            For num_regions>2: equal split (each region gets total_ways/num_regions)
-        """
         self.num_regions = int(num_regions)
         self.region_split_ratio = float(region_split_ratio)
         
@@ -47,64 +29,29 @@ class HybridWrapperCache:
         self._num_partitions = int(num_partitions)
         self._ways_total = int(num_blocks_per_set)
 
-        # Compute per-region way budgets
-        self._ways_per_region = self._compute_way_allocation()
+        self._ways_per_bank = [self._ways_total] * self.num_regions
 
         # Determine if single region mode (only one active region)
-        active_regions = [i for i, w in enumerate(self._ways_per_region) if w > 0]
+        active_regions = [i for i, w in enumerate(self._ways_per_bank) if w > 0]
         self.single_region_mode = len(active_regions) == 1
         self.active_region = active_regions[0] if self.single_region_mode else None
 
-        print(f"Multi-region cache configuration:")
-        print(f"  num_regions={self.num_regions}, sets={self._num_sets}, index_bits={self._num_index_bits}")
+        print(f"S-NUCA cache configuration:")
+        print(f"  banks={self.num_regions}, sets/bank={self._num_sets}, index_bits={self._num_index_bits}")
         print(f"  partitions={self._num_partitions}, total_ways={self._ways_total}")
-        print(f"  ways_per_region={self._ways_per_region}")
+        print(f"  ways_per_bank={self._ways_per_bank}")
         if self.single_region_mode:
-            print(f"  Single region mode: Only region {self.active_region} is active")
+            print(f"  One-bank mode: bank {self.active_region}")
 
-        # Instantiate N region caches
         self.region_caches = [self._create_region_cache(cache_class, ways) 
-                              for ways in self._ways_per_region]
+                              for ways in self._ways_per_bank]
 
         # Stats: track per-region
         self.region_accesses = [0] * self.num_regions
         self.region_hits = [0] * self.num_regions
 
-    def _compute_way_allocation(self):
-        """Compute per-region way allocation based on num_regions and split ratio."""
-        if self.num_regions == 2:
-            # Backward compatible: use region_split_ratio
-            if not (0.0 <= self.region_split_ratio <= 1.0):
-                raise ValueError("region_split_ratio must be in [0.0, 1.0]")
-            
-            w0 = _round_to_multiple(self._ways_total * self.region_split_ratio, self._num_partitions)
-            w0 = max(0, min(self._ways_total, w0))
-            w1 = self._ways_total - w0
-            
-            # Ensure at least one active region if split ratio is in (0,1)
-            if 0.0 < self.region_split_ratio < 1.0:
-                if w0 == 0:
-                    w0 = self._num_partitions
-                    w1 = self._ways_total - w0
-                if w1 == 0 and self._ways_total >= self._num_partitions:
-                    w1 = self._num_partitions
-                    w0 = self._ways_total - w1
-            
-            return [w0, w1]
-        else:
-            # Multi-region: equal split
-            ways_per_region = max(1, self._ways_total // self.num_regions)
-            allocation = [ways_per_region] * self.num_regions
-            
-            # Distribute remainder ways to first regions
-            remainder = self._ways_total - (ways_per_region * self.num_regions)
-            for i in range(remainder):
-                allocation[i] += 1
-            
-            return allocation
-
     def _create_region_cache(self, cache_class, ways):
-        """Create a cache instance for a region with given ways, or None if ways=0."""
+        """Create a bank-local cache with original associativity."""
         if ways <= 0:
             return None
         
@@ -113,13 +60,13 @@ class HybridWrapperCache:
             num_sets=self._num_sets,
             num_index_bits=self._num_index_bits,
             num_partitions=self._num_partitions,
-            ways_per_partition=max(1, ways // self._num_partitions)
+            ways_per_partition=ways // self._num_partitions
         )
 
     def smaller_region_id(self):
-        """Return ID of smallest region (by way count)"""
-        min_ways = min(w for w in self._ways_per_region if w > 0)
-        return next(i for i, w in enumerate(self._ways_per_region) if w == min_ways)
+        """Return ID of smallest region (all S-NUCA banks are equal)."""
+        min_ways = min(w for w in self._ways_per_bank if w > 0)
+        return next(i for i, w in enumerate(self._ways_per_bank) if w == min_ways)
 
     # ---- probes ----
     def _is_hit_in_region(self, region_id, ref):
@@ -145,11 +92,11 @@ class HybridWrapperCache:
             raise ValueError(f"Region {region_id} is not available")
         
         cache = self.region_caches[region_id]
-        region_ways = self._ways_per_region[region_id]
+        bank_ways = self._ways_per_bank[region_id]
         
         cache.set_block(
             replacement_policy=replacement_policy,
-            num_blocks_per_set=region_ways,
+            num_blocks_per_set=bank_ways,
             addr_partition=ref.partition,
             num_partition=self._num_partitions,
             addr_index=ref.index,
@@ -211,7 +158,7 @@ class HybridWrapperCache:
         stats = {}
         for i in range(self.num_regions):
             occ = self._count_blocks(self.region_caches[i])
-            cap = self._num_sets * self._ways_per_region[i]
+            cap = self._num_sets * self._ways_total
             hit_rate = (self.region_hits[i] / self.region_accesses[i]) if self.region_accesses[i] else 0.0
             stats[f'region{i}'] = {
                 'occupied': occ,

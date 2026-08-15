@@ -1,5 +1,6 @@
 import random
 import configparser
+import math
 MIN_ADDRESS = 0
 MAX_ADDRESS = 10000000000
 BYTES_PER_WORD = 8
@@ -57,12 +58,63 @@ def get_new_random_addresses(unique_sender_addr, num_addresses):
             num_addresses -= 1
     return new_addresses
 
-def get_bank_id(address, num_banks, num_words_per_block):
-    """Determine which bank an address maps to based on block offset."""
-    BYTES_PER_WORD = 8
-    bytes_per_block = num_words_per_block * BYTES_PER_WORD
-    block_number = address // bytes_per_block
+def require_power_of_two(value, name):
+    if value <= 0 or (value & (value - 1)) != 0:
+        raise ValueError(f"{name} must be a positive power of two")
+
+
+def get_block_number(word_address, num_words_per_block):
+    """Addresses in this simulator are word addresses, not byte addresses."""
+    return int(word_address) // int(num_words_per_block)
+
+
+def get_bank_id(word_address, num_banks, num_words_per_block):
+    """Determine the S-NUCA bank from a word-address block number."""
+    block_number = get_block_number(word_address, num_words_per_block)
     return block_number % num_banks
+
+
+def get_snuca_geometry(cache_size, num_words_per_block, num_blocks_per_set, num_banks):
+    require_power_of_two(num_words_per_block, "num_words_per_block")
+    require_power_of_two(num_blocks_per_set, "num_blocks_per_set")
+    require_power_of_two(num_banks, "num_banks")
+
+    total_blocks = (cache_size // BYTES_PER_WORD) // num_words_per_block
+    if total_blocks % num_blocks_per_set != 0:
+        raise ValueError("total cache blocks must be divisible by ways/set")
+
+    global_num_sets = total_blocks // num_blocks_per_set
+    require_power_of_two(global_num_sets, "global_num_sets")
+    if global_num_sets % num_banks != 0:
+        raise ValueError("global_num_sets must be divisible by num_banks")
+
+    sets_per_bank = global_num_sets // num_banks
+    require_power_of_two(sets_per_bank, "sets_per_bank")
+
+    global_index_bits = int(math.log2(global_num_sets))
+    bank_bits = int(math.log2(num_banks))
+    local_index_bits = int(math.log2(sets_per_bank))
+    if global_index_bits != bank_bits + local_index_bits:
+        raise ValueError("S-NUCA bit decomposition is inconsistent")
+
+    aggregate_lines = num_banks * sets_per_bank * num_blocks_per_set
+    if aggregate_lines != total_blocks:
+        raise ValueError("S-NUCA geometry does not preserve aggregate capacity")
+
+    return {
+        "total_blocks": total_blocks,
+        "global_num_sets": global_num_sets,
+        "sets_per_bank": sets_per_bank,
+        "global_index_bits": global_index_bits,
+        "bank_bits": bank_bits,
+        "local_index_bits": local_index_bits,
+        "aggregate_lines": aggregate_lines,
+    }
+
+
+def get_local_set(word_address, num_words_per_block, num_banks, sets_per_bank):
+    block_number = get_block_number(word_address, num_words_per_block)
+    return (block_number // num_banks) % sets_per_bank
 
 
 def get_new_random_addresses_for_banks(unique_sender_addr, num_addresses, target_banks, num_banks, num_words_per_block):

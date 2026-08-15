@@ -26,6 +26,9 @@ class Reference(object):
         num_partitions,
         ways_per_partition,
         target_region=0,
+        num_banks=1,
+        sets_per_bank=None,
+        snuca_indexing=False,
     ):
         self.word_addr = WordAddress(word_addr)
         self.bin_addr = BinaryAddress(
@@ -38,7 +41,8 @@ class Reference(object):
         )
         self.tag = self.bin_addr.get_tag(num_tag_bits)
         self.cache_status = None
-        self.target_region = target_region  # Store target region for hybrid cache
+        self.bank = target_region
+        self.target_region = target_region
         self.region = None
 
     def __str__(self):
@@ -65,4 +69,3 @@ class ReferenceCacheStatus(Enum):
             return "miss"
 
     __repr__ = __str__
-

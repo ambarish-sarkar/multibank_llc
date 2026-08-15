@@ -26,6 +26,9 @@ class Reference(object):
         num_partitions,
         ways_per_partition,
         target_region=0,
+        num_banks=1,
+        sets_per_bank=None,
+        snuca_indexing=False,
     ):
         self.word_addr = WordAddress(word_addr)
         self.bin_addr = BinaryAddress(
@@ -33,12 +36,23 @@ class Reference(object):
         )
         self.offset = self.bin_addr.get_offset(num_offset_bits)
         self.partition = self.bin_addr.get_partition(num_partitions, ways_per_partition)
-        self.index = self.bin_addr.get_index(
-            num_offset_bits, num_index_bits, num_partitions
-        )
+        self.bank = target_region
+        if snuca_indexing:
+            if sets_per_bank is None:
+                raise ValueError("sets_per_bank is required for S-NUCA indexing")
+            words_per_block = 1 << num_offset_bits
+            block_number = int(self.word_addr) // words_per_block
+            local_set = (block_number // num_banks) % sets_per_bank
+            self.index = BinaryAddress(
+                word_addr=WordAddress(local_set), num_addr_bits=num_index_bits
+            )
+        else:
+            self.index = self.bin_addr.get_index(
+                num_offset_bits, num_index_bits, num_partitions
+            )
         self.tag = self.bin_addr.get_tag(num_tag_bits)
         self.cache_status = None
-        self.target_region = target_region  # Store target region for hybrid cache
+        self.target_region = target_region
         self.region = None
 
     def __str__(self):
@@ -65,4 +79,3 @@ class ReferenceCacheStatus(Enum):
             return "miss"
 
     __repr__ = __str__
-
