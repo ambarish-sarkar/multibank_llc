@@ -32,8 +32,8 @@ if [[ ! -f "$ROOT/validate_snuca.py" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$ROOT/plot_snuca_experiments.py" ]]; then
-  echo "ERROR: plot_snuca_experiments.py is missing from $ROOT"
+if [[ ! -f "$ROOT/plot_diffs.py" ]]; then
+  echo "ERROR: plot_diffs.py is missing from $ROOT"
   exit 1
 fi
 
@@ -138,13 +138,13 @@ run_scenario 4 "0,1,2,3" "all_banks"
 
 echo
 echo "=== Simulations complete. Generating plots ==="
-python3 "$ROOT/plot_snuca_experiments.py" --base-dir "$ROOT/results" --ratio "$RATIO"
+python3 "$ROOT/plot_diffs.py"
 
 echo
 echo "============================================================"
 echo "All requested experiments are complete."
 echo "Results : $ROOT/results/<design>/"
-echo "Plots   : $ROOT/results/plots_snuca/"
+echo "Plots   : $ROOT/results/<design>/plots_bit_diff_misses/"
 echo "Logs    : $LOG_DIR"
 echo "Original config.ini files have been restored."
 echo "============================================================"
