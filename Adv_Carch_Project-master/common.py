@@ -46,9 +46,11 @@ def parse_config():
     c.banks_to_attack = int(cfg.get('banks-to-attack', 1))
     if c.attack_mode not in ('region0', 'region1', 'simultaneous'):
         raise ValueError("attack-mode must be 'region0', 'region1', or 'simultaneous'")
-    if c.banks_to_attack > c.num_banks:
-        raise ValueError(f"banks-to-attack ({c.banks_to_attack}) cannot exceed num-banks ({c.num_banks})")
     explicit_target_banks = 'target-banks' in cfg
+    if not explicit_target_banks and (c.banks_to_attack < 1 or c.banks_to_attack > c.num_banks):
+        raise ValueError(
+            f"banks-to-attack ({c.banks_to_attack}) must be between 1 and num-banks ({c.num_banks})"
+        )
     c.target_banks = resolve_target_banks(
         c.attack_mode,
         c.num_banks,

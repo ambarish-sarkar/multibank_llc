@@ -4,6 +4,7 @@ import math
 import os
 import random
 import sys
+import tempfile
 
 from common import (
     BYTES_PER_WORD,
@@ -16,6 +17,7 @@ from common import (
     get_snuca_geometry,
     get_total_cache_lines,
     parse_target_banks,
+    parse_config,
     require_power_of_two,
     resolve_target_banks,
     validate_target_banks,
@@ -919,6 +921,39 @@ def check_target_bank_parsing():
     assert resolve_target_banks("region1", 4, 1, None) == [1]
     assert resolve_target_banks("region1", 1, 1, None) == [0]
     assert resolve_target_banks("simultaneous", 8, 3, "1,4,6") == [1, 4, 6]
+
+    base_config = """[configs]
+cache-size=8388608
+num-blocks-per-set=8
+num-partitions=1
+num-words-per-block=8
+num-addr-bits=64
+replacement-policy=rand
+region-split-ratio=0.5
+attack-mode=simultaneous
+num-banks=2
+banks-to-attack=4
+"""
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.chdir(tmpdir)
+        try:
+            with open("config.ini", "w") as config_file:
+                config_file.write(base_config + "target-banks=1\n")
+            parsed = parse_config()
+            assert parsed.target_banks == [1]
+            assert parsed.banks_to_attack == 1
+
+            with open("config.ini", "w") as config_file:
+                config_file.write(base_config)
+            try:
+                parse_config()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Stale legacy banks-to-attack did not raise")
+        finally:
+            os.chdir(old_cwd)
     print("Target-bank parsing OK")
 
 
