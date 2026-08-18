@@ -7,11 +7,18 @@ import sys
 
 from common import (
     BYTES_PER_WORD,
+    get_new_random_addresses_for_banks,
+    get_receiver_access_counts,
     get_bank_id,
     get_block_number,
     get_local_set,
+    get_selected_bank_capacity,
     get_snuca_geometry,
+    get_total_cache_lines,
+    parse_target_banks,
     require_power_of_two,
+    resolve_target_banks,
+    validate_target_banks,
 )
 
 
@@ -883,7 +890,116 @@ def check_mirage_error_handling():
     print("MIRAGE error handling OK")
 
 
+def check_target_bank_parsing():
+    assert parse_target_banks("0") == [0]
+    assert parse_target_banks("2") == [2]
+    assert parse_target_banks("0,2") == [0, 2]
+    assert parse_target_banks("1,3") == [1, 3]
+    assert parse_target_banks("1,4,6") == [1, 4, 6]
+    assert validate_target_banks([1, 4, 6], 8) == [1, 4, 6]
+
+    invalid_cases = [
+        lambda: parse_target_banks(""),
+        lambda: validate_target_banks([-1], 4),
+        lambda: validate_target_banks([4], 4),
+        lambda: validate_target_banks([], 4),
+        lambda: validate_target_banks([1, 1], 4),
+        lambda: resolve_target_banks("simultaneous", 4, 1, "0,4"),
+        lambda: resolve_target_banks("simultaneous", 4, 1, "1,1"),
+    ]
+    for case in invalid_cases:
+        try:
+            case()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid target-bank input did not raise")
+
+    assert resolve_target_banks("simultaneous", 4, 2, None) == [0, 1]
+    assert resolve_target_banks("region1", 4, 1, None) == [1]
+    assert resolve_target_banks("region1", 1, 1, None) == [0]
+    assert resolve_target_banks("simultaneous", 8, 3, "1,4,6") == [1, 4, 6]
+    print("Target-bank parsing OK")
+
+
+def check_target_bank_address_generation():
+    random.seed(991)
+    target_banks = [1, 3]
+    addresses = get_new_random_addresses_for_banks(
+        set(), 500, target_banks, 4, NUM_WORDS_PER_BLOCK
+    )
+    assert len(addresses) == 500
+    seen_banks = {get_bank_id(addr, 4, NUM_WORDS_PER_BLOCK) for addr in addresses}
+    assert seen_banks <= {1, 3}
+    assert seen_banks == {1, 3}
+    assert 0 not in seen_banks
+    assert 2 not in seen_banks
+    print("Target-bank address generation OK")
+
+
+def check_selected_bank_occupancy_normalization():
+    total_cache_lines = get_total_cache_lines(CACHE_SIZE, NUM_WORDS_PER_BLOCK)
+    assert total_cache_lines == 131072
+
+    capacity_per_bank, selected_capacity = get_selected_bank_capacity(
+        total_cache_lines, 4, [2]
+    )
+    assert capacity_per_bank == 32768
+    assert selected_capacity == 32768
+    assert [int(selected_capacity * pct / 100) for pct in (25, 50, 100)] == [
+        8192,
+        16384,
+        32768,
+    ]
+
+    capacity_per_bank, selected_capacity = get_selected_bank_capacity(
+        total_cache_lines, 4, [0, 2]
+    )
+    assert capacity_per_bank == 32768
+    assert selected_capacity == 65536
+    assert [int(selected_capacity * pct / 100) for pct in (25, 50, 100)] == [
+        16384,
+        32768,
+        65536,
+    ]
+
+    capacity_per_bank, selected_capacity = get_selected_bank_capacity(
+        total_cache_lines, 4, [0, 1, 2, 3]
+    )
+    assert capacity_per_bank == 32768
+    assert selected_capacity == 131072
+    assert int(selected_capacity * 25 / 100) == int(total_cache_lines * 25 / 100)
+
+    capacity_per_bank, selected_capacity = get_selected_bank_capacity(
+        total_cache_lines, 8, [1, 4, 6]
+    )
+    assert capacity_per_bank == 16384
+    assert selected_capacity == 49152
+    assert [int(selected_capacity * pct / 100) for pct in (25, 50, 100)] == [
+        12288,
+        24576,
+        49152,
+    ]
+
+    one_bank_capacity = get_selected_bank_capacity(total_cache_lines, 1, [0])
+    two_bank_all_capacity = get_selected_bank_capacity(total_cache_lines, 2, [0, 1])
+    four_bank_all_capacity = get_selected_bank_capacity(
+        total_cache_lines, 4, [0, 1, 2, 3]
+    )
+    assert one_bank_capacity[1] == total_cache_lines
+    assert two_bank_all_capacity[1] == total_cache_lines
+    assert four_bank_all_capacity[1] == total_cache_lines
+    assert get_receiver_access_counts(four_bank_all_capacity[1]) == [
+        int(total_cache_lines * pct / 100)
+        for pct in (1, 2, 5, 10, 15, 20, 25, 30, 35, 40)
+    ]
+    print("Selected-bank occupancy normalization OK")
+
+
 def main():
+    check_target_bank_parsing()
+    check_target_bank_address_generation()
+    check_selected_bank_occupancy_normalization()
     print_geometry()
     check_actual_wrapper_capacity()
     check_normal_mapping()

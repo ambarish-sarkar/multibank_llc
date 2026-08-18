@@ -24,7 +24,8 @@ def run_experiment(receiver_addrs, sender_addrs, cli_args):
         region_split_ratio=cli_args.region_split_ratio,
         attack_mode=cli_args.attack_mode,
         num_banks=cli_args.num_banks,
-        banks_to_attack=cli_args.banks_to_attack
+        banks_to_attack=cli_args.banks_to_attack,
+        target_banks=cli_args.target_banks
     )
 
     # Count receiver misses (timing == 600)
@@ -33,16 +34,10 @@ def run_experiment(receiver_addrs, sender_addrs, cli_args):
 
     # For simultaneous mode: return list of misses for each region
     if cli_args.attack_mode == 'simultaneous':
-        num_regions = cli_args.banks_to_attack
-        return [count_misses(timing_by_region.get(f'region{i}', {})) for i in range(num_regions)]
+        return [count_misses(timing_by_region.get(f'region{i}', {})) for i in cli_args.target_banks]
     
     # Single-region modes: return single value
-    if cli_args.attack_mode == 'region0':
-        return count_misses(timing_by_region.get('region0', {}))
-    elif cli_args.num_banks > 1:
-        return count_misses(timing_by_region.get('region1', {}))
-    else:
-        return count_misses(timing_by_region.get('region0', {}))
+    return sum(count_misses(timing_by_region.get(f'region{i}', {})) for i in cli_args.target_banks)
 
 if __name__ == '__main__':
     cli_args = parse_config()
@@ -59,19 +54,10 @@ if __name__ == '__main__':
     print(f"  Partitions: {cli_args.num_partitions}")
     print(f"  Region split ratio: {cli_args.region_split_ratio}")
     print(f"  Attack mode: {cli_args.attack_mode}")
-    print(f"  Number of banks: {cli_args.num_banks}")
-    print(f"  Banks to attack: {cli_args.banks_to_attack}")
-
-    # Determine target banks for S-NUCA.
-    if cli_args.attack_mode == 'region1' and cli_args.num_banks > 1:
-        target_banks = [1]
-        print(f"  Targeting single bank: {target_banks[0]}")
-    elif cli_args.attack_mode in ('region0', 'region1'):
-        target_banks = [0]
-        print(f"  Targeting single bank: {target_banks[0]}")
-    else:
-        target_banks = list(range(cli_args.banks_to_attack))
-        print(f"  Targeting banks: {target_banks}")
+    capacity_per_bank, selected_bank_capacity = get_selected_bank_capacity(
+        total_cache_lines, cli_args.num_banks, cli_args.target_banks
+    )
+    print_experiment_bank_config(cli_args, total_cache_lines, capacity_per_bank, selected_bank_capacity)
 
     sender_accesses_for_0 = int(total_cache_lines * sender_percent_for_0 / 100)
     sender_accesses_for_1 = int(total_cache_lines * sender_percent_for_1 / 100)
@@ -80,13 +66,12 @@ if __name__ == '__main__':
           f"{sender_accesses_for_1} ({sender_percent_for_1}%) for bit '1'")
 
     # Receiver access counts to target occupancy (approx)
-    receiver_access_counts = [
-        int(total_cache_lines * pct / 100) for pct in target_occupancy_percentages
-    ]
+    receiver_access_counts = get_receiver_access_counts(selected_bank_capacity)
+    target_banks_label = get_target_banks_label(cli_args.target_banks)
 
     if cli_args.num_banks > 1:
-        file_0 = f"../results/scatter/outfile_v1_bit_0_{cli_args.region_split_ratio}_{cli_args.attack_mode}_banks{cli_args.num_banks}_attack{cli_args.banks_to_attack}.txt"
-        file_1 = f"../results/scatter/outfile_v1_bit_1_{cli_args.region_split_ratio}_{cli_args.attack_mode}_banks{cli_args.num_banks}_attack{cli_args.banks_to_attack}.txt"
+        file_0 = f"../results/scatter/outfile_v1_bit_0_{cli_args.region_split_ratio}_{cli_args.attack_mode}_banks{cli_args.num_banks}_{target_banks_label}.txt"
+        file_1 = f"../results/scatter/outfile_v1_bit_1_{cli_args.region_split_ratio}_{cli_args.attack_mode}_banks{cli_args.num_banks}_{target_banks_label}.txt"
     else:
         file_0 = f"../results/scatter/outfile_v1_bit_0_{cli_args.region_split_ratio}_{cli_args.attack_mode}.txt"
         file_1 = f"../results/scatter/outfile_v1_bit_1_{cli_args.region_split_ratio}_{cli_args.attack_mode}.txt"
@@ -95,13 +80,13 @@ if __name__ == '__main__':
     print(f"Sender accesses: {sender_accesses_for_0} for bit '0', {sender_accesses_for_1} for bit '1'")
 
     # Store addresses for each trial to reuse in bit '1' experiment
-    trial_addresses = get_trial_addresses(sender_accesses_for_0, sender_accesses_for_1, receiver_access_counts[-1],target_banks, cli_args.num_banks, cli_args.num_words_per_block)
+    trial_addresses = get_trial_addresses(sender_accesses_for_0, sender_accesses_for_1, receiver_access_counts[-1], cli_args.target_banks, cli_args.num_banks, cli_args.num_words_per_block)
 
     # Experiment for bit '0'
     with open(file_0, "w") as f:
         print("\nSender transmitting bit '0'\n")
         for target_percent, num_receiver_addrs in zip(target_occupancy_percentages, receiver_access_counts):
-            print(f"Target occupancy: {target_percent}% (using {num_receiver_addrs} receiver addresses)")
+            print(f"Target occupancy: {target_percent}% of selected-bank capacity (using {num_receiver_addrs} receiver addresses)")
             
             for trial in range(100):
                 addrs = trial_addresses[trial]
@@ -120,7 +105,7 @@ if __name__ == '__main__':
     with open(file_1, "w") as f:
         print("\nSender transmitting bit '1'\n")
         for target_percent, num_receiver_addrs in zip(target_occupancy_percentages, receiver_access_counts):
-            print(f"Target occupancy: {target_percent}% (using {num_receiver_addrs} receiver addresses)")
+            print(f"Target occupancy: {target_percent}% of selected-bank capacity (using {num_receiver_addrs} receiver addresses)")
             
             for trial in range(100):
                 # Retrieve THE SAME addresses used in bit '0' for this trial
@@ -139,4 +124,4 @@ if __name__ == '__main__':
                     f.write(str([target_percent, num_receiver_addrs, res]) + "\n")
                 f.flush()
 
-    print("\Scatter cache covert channel simulation completed!")
+    print("\nScatter cache covert channel simulation completed!")

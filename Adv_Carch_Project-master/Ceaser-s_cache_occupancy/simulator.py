@@ -8,7 +8,7 @@ import sys
 from collections import OrderedDict
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from common import get_bank_id, get_snuca_geometry
+from common import get_bank_id, get_snuca_geometry, resolve_target_banks, validate_target_banks
 from hybrid_wrapper_cache import HybridWrapperCache
 from reference import Reference
 
@@ -59,7 +59,8 @@ class Simulator(object):
                        region_split_ratio=0.3,
                        attack_mode='region0',
                        num_banks=1,
-                       banks_to_attack=1):
+                       banks_to_attack=1,
+                       target_banks=None):
 
         # -------- S-NUCA geometry -----------
         geom = get_snuca_geometry(
@@ -79,12 +80,10 @@ class Simulator(object):
         ways_per_partition = max(1, num_blocks_per_set // num_partitions)
 
         num_regions = num_banks
-        if attack_mode == 'region1' and num_banks > 1:
-            target_regions = [1]
-        elif attack_mode in ('region0', 'region1'):
-            target_regions = [0]
+        if target_banks is None:
+            target_regions = resolve_target_banks(attack_mode, num_banks, banks_to_attack)
         else:
-            target_regions = list(range(banks_to_attack))
+            target_regions = validate_target_banks(target_banks, num_banks)
 
         region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
         for addr in receiver_addresses:

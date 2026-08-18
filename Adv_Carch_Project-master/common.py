@@ -23,6 +23,8 @@ class Configs:
         self.attack_mode = ""
         self.num_banks = 0
         self.banks_to_attack = 0
+        self.target_banks = []
+        self.target_banks_source = ""
 
 def parse_config():
     parser = configparser.ConfigParser()
@@ -46,7 +48,106 @@ def parse_config():
         raise ValueError("attack-mode must be 'region0', 'region1', or 'simultaneous'")
     if c.banks_to_attack > c.num_banks:
         raise ValueError(f"banks-to-attack ({c.banks_to_attack}) cannot exceed num-banks ({c.num_banks})")
+    explicit_target_banks = 'target-banks' in cfg
+    c.target_banks = resolve_target_banks(
+        c.attack_mode,
+        c.num_banks,
+        c.banks_to_attack,
+        cfg.get('target-banks') if explicit_target_banks else None,
+    )
+    c.target_banks_source = 'target-banks' if explicit_target_banks else 'legacy banks-to-attack/attack-mode'
+    if explicit_target_banks and 'banks-to-attack' in cfg and c.banks_to_attack != len(c.target_banks):
+        print(
+            "target-banks is set; overriding legacy banks-to-attack "
+            f"count {c.banks_to_attack} with {len(c.target_banks)} selected banks"
+        )
+    c.banks_to_attack = len(c.target_banks)
     return c
+
+
+def parse_target_banks(target_banks_text):
+    if target_banks_text is None:
+        return None
+    text = str(target_banks_text).strip()
+    if not text:
+        raise ValueError("target-banks must specify at least one bank")
+    banks = []
+    for token in text.split(','):
+        token = token.strip()
+        if not token:
+            raise ValueError(f"Invalid empty bank in target-banks={target_banks_text!r}")
+        try:
+            bank = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid bank ID {token!r} in target-banks") from exc
+        banks.append(bank)
+    return banks
+
+
+def validate_target_banks(target_banks, num_banks):
+    if target_banks is None or len(target_banks) == 0:
+        raise ValueError("At least one target bank must be specified")
+    seen = set()
+    for bank in target_banks:
+        if bank in seen:
+            raise ValueError(f"Duplicate target bank ID: {bank}")
+        seen.add(bank)
+        if bank < 0 or bank >= num_banks:
+            raise ValueError(f"Target bank {bank} is outside valid range 0..{num_banks - 1}")
+    return list(target_banks)
+
+
+def resolve_target_banks(attack_mode, num_banks, banks_to_attack=1, target_banks_text=None):
+    explicit = parse_target_banks(target_banks_text)
+    if explicit is not None:
+        return validate_target_banks(explicit, num_banks)
+    if attack_mode == 'region1' and num_banks > 1:
+        legacy = [1]
+    elif attack_mode in ('region0', 'region1'):
+        legacy = [0]
+    else:
+        if banks_to_attack <= 0:
+            raise ValueError("banks-to-attack must be at least 1")
+        if banks_to_attack > num_banks:
+            raise ValueError(f"banks-to-attack ({banks_to_attack}) cannot exceed num-banks ({num_banks})")
+        legacy = list(range(banks_to_attack))
+    return validate_target_banks(legacy, num_banks)
+
+
+def get_total_cache_lines(cache_size, num_words_per_block):
+    bytes_per_line = num_words_per_block * BYTES_PER_WORD
+    return cache_size // bytes_per_line
+
+
+def get_selected_bank_capacity(total_cache_lines, num_banks, target_banks):
+    validate_target_banks(target_banks, num_banks)
+    if total_cache_lines % num_banks != 0:
+        raise ValueError("total cache lines must be divisible by num_banks")
+    capacity_per_bank = total_cache_lines // num_banks
+    selected_capacity = capacity_per_bank * len(target_banks)
+    return capacity_per_bank, selected_capacity
+
+
+def get_receiver_access_counts(selected_bank_capacity):
+    return [
+        int(selected_bank_capacity * pct / 100)
+        for pct in target_occupancy_percentages
+    ]
+
+
+def get_target_banks_label(target_banks):
+    return "banks_" + "-".join(str(bank) for bank in target_banks)
+
+
+def print_experiment_bank_config(cli_args, total_cache_lines, capacity_per_bank, selected_bank_capacity):
+    print(f"  Number of banks: {cli_args.num_banks}")
+    print(f"  Target banks: {cli_args.target_banks}")
+    print(f"  Target bank source: {cli_args.target_banks_source}")
+    print(f"  Number of target banks: {len(cli_args.target_banks)}")
+    print(f"  Total cache lines: {total_cache_lines}")
+    print(f"  Capacity per bank: {capacity_per_bank}")
+    print(f"  Selected bank capacity: {selected_bank_capacity}")
+    print("  region_split_ratio is legacy/unused for equal-capacity S-NUCA banks")
 
 def get_new_random_addresses(unique_sender_addr, num_addresses):
     new_addresses = []

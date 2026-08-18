@@ -12,6 +12,7 @@ from collections import OrderedDict
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from common import get_bank_id as get_snuca_bank_id
 from common import require_power_of_two
+from common import resolve_target_banks, validate_target_banks
 
 from hybrid_wrapper_cache import HybridWrapperCache
 from bin_addr import BinaryAddress
@@ -126,7 +127,8 @@ class Simulator(object):
                        region_split_ratio=0.3,
                        attack_mode='region0',
                        num_banks=1,
-                       banks_to_attack=1):
+                       banks_to_attack=1,
+                       target_banks=None):
         """
         attack_mode: 'region0' | 'region1' | 'simultaneous'
         num_banks: number of banks (regions) in multi-bank mode
@@ -158,17 +160,14 @@ class Simulator(object):
         # -------- Generic N-region simulation -----------
         # Determine number of regions and how to distribute addresses
         num_regions = num_banks
-        if attack_mode == 'region1' and num_banks > 1:
-            target_regions = [1]
-            print(f"S-NUCA Mirage: single-bank attack on bank 1")
-        elif attack_mode in ('region0', 'region1'):
-            target_regions = [0]
-            print(f"S-NUCA Mirage: single-bank attack on bank 0")
+        if target_banks is None:
+            target_regions = resolve_target_banks(attack_mode, num_banks, banks_to_attack)
         else:
-            if banks_to_attack > num_banks:
-                raise ValueError("banks_to_attack cannot exceed num_banks")
-            target_regions = list(range(banks_to_attack))
-            print(f"S-NUCA Mirage: simultaneous attack on {banks_to_attack} banks")
+            target_regions = validate_target_banks(target_banks, num_banks)
+        if len(target_regions) == 1:
+            print(f"S-NUCA Mirage: single-bank attack on bank {target_regions[0]}")
+        else:
+            print(f"S-NUCA Mirage: simultaneous attack on banks {target_regions}")
 
         region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
         for addr in receiver_addresses:
@@ -183,7 +182,7 @@ class Simulator(object):
         # Create N-region cache
         cache = HybridWrapperCache(
             num_regions=num_regions,
-            region_split_ratio=region_split_ratio,  # Used only when num_regions=2
+            region_split_ratio=region_split_ratio,  # Legacy/unused for equal-capacity S-NUCA
             num_data_blocks=num_data_blocks,
             num_sets_per_skew=num_sets_per_skew,
             num_index_bits=num_index_bits,
