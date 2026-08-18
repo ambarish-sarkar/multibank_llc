@@ -1,7 +1,0 @@
-cache,ratio,attack,num_banks,num_attacks,format,plot
-scatter,0.3,region0,2,2,single,results/scatter/plots_bit_diff_misses/scatter_ratio-0.3_attack-region0_banks2_attack2_delta_misses_single.png
-scatter,0.5,region0,2,2,single,results/scatter/plots_bit_diff_misses/scatter_ratio-0.5_attack-region0_banks2_attack2_delta_misses_single.png
-scatter,0.5,simultaneous,2,2,dual,results/scatter/plots_bit_diff_misses/scatter_ratio-0.5_attack-simultaneous_banks2_attack2_delta_misses_dual.png
-scatter,0.5,simultaneous,4,1,single,results/scatter/plots_bit_diff_misses/scatter_ratio-0.5_attack-simultaneous_banks4_attack1_delta_misses_single.png
-scatter,0.5,simultaneous,4,4,multi,results/scatter/plots_bit_diff_misses/scatter_ratio-0.5_attack-simultaneous_banks4_attack4_delta_misses_multi.png
-scatter,1.0,region0,2,2,single,results/scatter/plots_bit_diff_misses/scatter_ratio-1.0_attack-region0_banks2_attack2_delta_misses_single.png
