@@ -1,0 +1,248 @@
+Cache configuration (Mirage):
+  Total cache lines (theoretical): 131072
+  Cache size: 8388608 bytes
+  Words per block: 8
+  Blocks per set: 8
+  Partitions: 2
+  Region split ratio: 0.5
+  Attack mode: simultaneous
+  Number of banks: 1
+  Target banks: [0]
+  Target bank source: target-banks
+  Number of target banks: 1
+  Total cache lines: 131072
+  Capacity per bank: 131072
+  Selected bank capacity: 131072
+  region_split_ratio is legacy/unused for equal-capacity S-NUCA banks
+Sender accesses: 1310 (1%) for bit '0', 2621 (2%) for bit '1'
+Starting Mirage covert channel experiment ...
+Sender accesses: 1310 for bit '0', 2621 for bit '1'
+
+Sender transmitting bit '0'
+
+Target occupancy: 1% of selected-bank capacity (using 1310 receiver addresses)
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
+  sets/skew/bank=8192, index_bits=13
+  skews=2, tag_ways=14
+  One-bank mode: bank 0
+S-NUCA Mirage: single-bank attack on bank 0
+S-NUCA Mirage Cache Configuration:
+  banks=1, data_blocks/bank=131072
