@@ -2,7 +2,8 @@ import math
 import os
 import random
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from functools import lru_cache
 
 from common import (
     BYTES_PER_WORD,
@@ -21,8 +22,13 @@ DESIGN_CEASER_S = "ceaser_s"
 DESIGN_SCATTER = "scatter"
 DESIGN_MIRAGE = "mirage"
 
+CEASER_KEY = "00000000000000000011"
+CEASER_S_KEYS = ("00000000000000002222", "00000000000000001111")
+MIRAGE_KEYS = ("00000000000000000000", "ffffffffffffffffffff")
 
-def _present_index(word_addr, num_words_per_block, num_index_bits, key_hex):
+
+@lru_cache(maxsize=None)
+def _present_cipher(key_hex):
     try:
         from present import Present
     except ModuleNotFoundError:
@@ -32,13 +38,47 @@ def _present_index(word_addr, num_words_per_block, num_index_bits, key_hex):
             from present import Present
         finally:
             sys.path.pop(0)
+    key = bin(int(key_hex, 16))[2:].zfill(80)
+    return Present(key)
 
+
+def _present_ciphertext(word_addr, num_words_per_block, key_hex):
     block_number = int(word_addr) // int(num_words_per_block)
     plaintext = bin(block_number)[2:].zfill(64)
-    key = bin(int(key_hex, 16))[2:].zfill(80)
-    cipher = Present(key)
+    cipher = _present_cipher(key_hex)
     ciphertext = str(bin(int(cipher.encrypt(plaintext), 16))[2:].zfill(64))
-    return int(ciphertext[-num_index_bits:], 2)
+    return ciphertext
+
+
+def _present_index(word_addr, num_words_per_block, num_index_bits, key_hex):
+    """Restore the original offset-aware CEASER index-field extraction.
+
+    The plaintext is the word address with offset bits removed.  The encrypted
+    index comes from the ciphertext field immediately above the original offset
+    bit positions, matching the pre-centralized BinaryAddress.get_index logic.
+    """
+    if num_index_bits <= 0:
+        return 0
+    offset_bits = int(math.log2(num_words_per_block))
+    ciphertext = _present_ciphertext(word_addr, num_words_per_block, key_hex)
+    end = len(ciphertext) - offset_bits
+    start = end - int(num_index_bits)
+    return int(ciphertext[start:end], 2)
+
+
+def _present_index_mod(word_addr, num_words_per_block, num_sets, key_hex):
+    """Map an encrypted index field onto any tag-set count.
+
+    For non-power-of-two counts, this extracts ceil(log2(num_sets)) encrypted
+    bits and applies modulo.  That makes every set 0..N-1 reachable.  The modulo
+    step has a small distribution bias for non-powers of two, which is accepted
+    here for simulator simplicity.
+    """
+    num_sets = int(num_sets)
+    if num_sets <= 1:
+        return 0
+    width = int(math.ceil(math.log2(num_sets)))
+    return _present_index(word_addr, num_words_per_block, width, key_hex) % num_sets
 
 
 def _plain_local_set(word_addr, num_words_per_block, num_banks, sets_per_bank):
@@ -98,6 +138,7 @@ class MirageRegion:
             for _ in range(self.tag_skews)
         ]
         self.data_store = [None for _ in range(self.data_entries)]
+        self.free_data = deque(range(self.data_entries))
 
     @property
     def tag_entries(self):
@@ -133,10 +174,10 @@ class MirageRegion:
         return False
 
     def _allocate_data(self, pointer):
-        for i, entry in enumerate(self.data_store):
-            if entry is None:
-                self.data_store[i] = pointer
-                return i
+        if self.free_data:
+            i = self.free_data.popleft()
+            self.data_store[i] = pointer
+            return i
         victim = random.randrange(self.data_entries)
         old_pointer = self.data_store[victim]
         if old_pointer is not None:
@@ -160,6 +201,8 @@ class BankedArchitectureCache:
             16 if design != DESIGN_MIRAGE else 8,
             cfg.num_banks,
         )
+        if design == DESIGN_MIRAGE:
+            self.geom = self._mirage_geometry()
         self.num_regions = cfg.num_regions
         self.bank_region = {}
         if design == DESIGN_MIRAGE:
@@ -177,10 +220,10 @@ class BankedArchitectureCache:
                 self.bank_region[bank][region] = SetAssociativeRegion(sets_per_bank, groups)
 
     def _init_mirage(self):
-        total_data = self.cfg.cache_size // (self.cfg.num_words_per_block * BYTES_PER_WORD)
-        data_per_bank = total_data // self.cfg.num_banks
+        total_data = self.geom["total_blocks"]
+        data_per_bank = self.geom["data_per_bank"]
         self.mirage_data_per_bank = data_per_bank
-        self.mirage_tag_sets_per_bank = data_per_bank // (2 * 8)
+        self.mirage_tag_sets_per_bank = self.geom["sets_per_bank"]
         for bank in range(self.cfg.num_banks):
             self.bank_region[bank] = {}
             for region, fraction in enumerate(self.cfg.region_fractions):
@@ -190,17 +233,35 @@ class BankedArchitectureCache:
                 tag_sets = data_entries // (2 * 8)
                 self.bank_region[bank][region] = MirageRegion(data_entries, tag_sets, 2, 14)
 
+    def _mirage_geometry(self):
+        total_data = self.cfg.cache_size // (self.cfg.num_words_per_block * BYTES_PER_WORD)
+        data_per_bank = total_data // self.cfg.num_banks
+        global_tag_sets_per_skew = total_data // (2 * 8)
+        if global_tag_sets_per_skew % self.cfg.num_banks != 0:
+            raise ValueError("MIRAGE global tag sets must divide cleanly across banks")
+        sets_per_bank = global_tag_sets_per_skew // self.cfg.num_banks
+        return {
+            "total_blocks": total_data,
+            "global_num_sets": global_tag_sets_per_skew,
+            "sets_per_bank": sets_per_bank,
+            "global_index_bits": int(math.log2(global_tag_sets_per_skew)),
+            "bank_bits": int(math.log2(self.cfg.num_banks)),
+            "local_index_bits": int(math.log2(sets_per_bank)),
+            "aggregate_lines": total_data,
+            "data_per_bank": data_per_bank,
+        }
+
     def _candidate_locations(self, word_addr, bank, region):
         local_bits = self.geom["local_index_bits"]
         sets_per_bank = self.geom["sets_per_bank"]
         if self.design == DESIGN_NORMAL:
             return [(0, _plain_local_set(word_addr, self.cfg.num_words_per_block, self.cfg.num_banks, sets_per_bank))]
         if self.design == DESIGN_CEASER:
-            return [(0, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, "00000000000000000011") % sets_per_bank)]
+            return [(0, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, CEASER_KEY) % sets_per_bank)]
         if self.design == DESIGN_CEASER_S:
             return [
-                (0, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, "00000000000000002222") % sets_per_bank),
-                (1, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, "00000000000000001111") % sets_per_bank),
+                (0, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, CEASER_S_KEYS[0]) % sets_per_bank),
+                (1, _present_index(word_addr, self.cfg.num_words_per_block, local_bits, CEASER_S_KEYS[1]) % sets_per_bank),
             ]
         if self.design == DESIGN_SCATTER:
             candidates = []
@@ -212,10 +273,9 @@ class BankedArchitectureCache:
 
     def _mirage_indexes(self, word_addr, region):
         tag_sets = self.bank_region[0][region].tag_sets_per_skew
-        index_bits = int(math.log2(tag_sets))
         return [
-            _present_index(word_addr, self.cfg.num_words_per_block, index_bits, "00000000000000002222") % tag_sets,
-            _present_index(word_addr, self.cfg.num_words_per_block, index_bits, "00000000000000001111") % tag_sets,
+            _present_index_mod(word_addr, self.cfg.num_words_per_block, tag_sets, MIRAGE_KEYS[0]),
+            _present_index_mod(word_addr, self.cfg.num_words_per_block, tag_sets, MIRAGE_KEYS[1]),
         ]
 
     def access(self, word_addr, bank, region):

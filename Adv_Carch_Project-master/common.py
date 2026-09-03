@@ -374,11 +374,33 @@ def get_bank_id(word_address, num_banks, num_words_per_block):
     return block_number % num_banks
 
 
-def get_region_id(word_address, cfg):
-    if cfg.num_regions <= 1:
+def get_region_id_from_block(block_number, num_banks, sets_per_bank, num_regions):
+    """Select an internal way-partition region independently of bank-local set.
+
+    S-NUCA bank selection uses the low ``log2(num_banks)`` block bits and the
+    bank-local set uses the next ``log2(sets_per_bank)`` bits.  Region selection
+    uses the remaining stream above those fields:
+
+        block = ((region_stream * sets_per_bank) + local_set) * num_banks + bank
+
+    Varying ``region_stream`` changes the region without changing the physical
+    bank or bank-local set, so strict regions partition ways/capacity, not sets.
+    """
+    if num_regions <= 1:
         return 0
+    region_stream = int(block_number) // (int(num_banks) * int(sets_per_bank))
+    return region_stream % int(num_regions)
+
+
+def get_region_id(word_address, cfg):
+    geom = get_snuca_geometry(cfg.cache_size, cfg.num_words_per_block, 16, cfg.num_banks)
     block_number = get_block_number(word_address, cfg.num_words_per_block)
-    return (block_number // cfg.num_banks) % cfg.num_regions
+    return get_region_id_from_block(
+        block_number,
+        cfg.num_banks,
+        geom["sets_per_bank"],
+        cfg.num_regions,
+    )
 
 
 def get_snuca_geometry(cache_size, num_words_per_block, num_blocks_per_set, num_banks):
