@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import os
 import random
 import statistics
+import tempfile
 
 from arch_model import (
     CEASER_KEY,
@@ -15,14 +17,27 @@ from common import (
     BYTES_PER_WORD,
     Configs,
     configure_architecture,
+    derive_cache_seed,
+    derive_workload_seed,
     get_bank_id,
+    get_receiver_access_counts,
     get_local_set,
     get_new_random_addresses_for_targets,
     get_region_id,
     get_snuca_geometry,
     sender_percent_for_0,
     sender_percent_for_1,
+    target_occupancy_percentages,
     validate_architecture_config,
+    get_trial_addresses,
+)
+from common_driver import output_path, outputs_are_complete
+from result_utils import (
+    STATUS_COMPLETE,
+    STATUS_INCOMPLETE,
+    STATUS_MALFORMED,
+    atomic_write_result,
+    classify_result_file,
 )
 
 
@@ -45,6 +60,7 @@ def cfg_for(design, mode, banks=1, ratio=0.75, targets=None, regions=None):
     c.strict_integer_split = True
     c.workload_mode = "default"
     c.trials = 1
+    c.seed = 20260904
     if design == "mirage":
         c.num_blocks_per_set = 8
         c.num_additional_tags = 6
@@ -416,6 +432,128 @@ def check_address_targeting():
     print("  bank+region constrained generation OK")
 
 
+def check_reproducible_workloads():
+    print("REPRODUCIBLE WORKLOADS")
+    total_cache_lines = 8388608 // 64
+    sender0 = int(total_cache_lines * sender_percent_for_0 / 100)
+    sender1 = int(total_cache_lines * sender_percent_for_1 / 100)
+    c_normal = cfg_for("normal", "region4", 4, targets=[0, 1, 2, 3], regions=[0, 1, 2, 3])
+    c_mirage = cfg_for("mirage", "region4", 4, targets=[0, 1, 2, 3], regions=[0, 1, 2, 3])
+    max_recv = get_receiver_access_counts(total_cache_lines)[-1]
+
+    first = get_trial_addresses(sender0, sender1, max_recv, cfg=c_normal, trials=1, base_seed=20260904)
+    repeat = get_trial_addresses(sender0, sender1, max_recv, cfg=c_normal, trials=1, base_seed=20260904)
+    other_design = get_trial_addresses(sender0, sender1, max_recv, cfg=c_mirage, trials=1, base_seed=20260904)
+    different_seed = get_trial_addresses(sender0, sender1, max_recv, cfg=c_normal, trials=1, base_seed=20260905)
+
+    assert_eq(first, repeat, "same seed repeated workload")
+    assert_eq(first[0]["sender_0"], other_design[0]["sender_0"], "cross-design bit0 sender")
+    assert_eq(first[0]["sender_1"], other_design[0]["sender_1"], "cross-design bit1 sender")
+    assert_eq(first[0]["all_receiver"], other_design[0]["all_receiver"], "cross-design receiver")
+    if first == different_seed:
+        raise AssertionError("different seed should change representative workload")
+    if derive_workload_seed(20260904, "region4", 4, [0, 1, 2, 3], [0, 1, 2, 3], "all", 0) == derive_workload_seed(20260904, "region4", 4, [0, 1, 2, 3], [0, 1, 2, 3], "all", 1):
+        raise AssertionError("trial must affect workload seed")
+    if derive_cache_seed(20260904, "normal", "region4", 4, [0, 1, 2, 3], 10, 0) == derive_cache_seed(20260904, "mirage", "region4", 4, [0, 1, 2, 3], 10, 0):
+        raise AssertionError("design must affect cache seed")
+
+    print("  same seed repeated workload: PASS")
+    print("  same seed cross-design workload equality: PASS")
+    print("  different seed changes workload: PASS")
+
+
+def check_bit_pair_relationship():
+    print("BIT PAIR RELATIONSHIP")
+    total_cache_lines = 8388608 // 64
+    sender0 = int(total_cache_lines * sender_percent_for_0 / 100)
+    sender1 = int(total_cache_lines * sender_percent_for_1 / 100)
+    c = cfg_for("scatter", "hybrid2", 2, targets=[0, 1], regions=[1])
+    addrs = get_trial_addresses(sender0, sender1, 256, cfg=c, trials=1, base_seed=20260904)[0]
+    assert_eq(len(addrs["sender_0"]), 1310, "bit0 sender length")
+    assert_eq(len(addrs["sender_1"]), 2621, "bit1 sender length")
+    if not set(addrs["sender_0"]).issubset(set(addrs["sender_1"])):
+        raise AssertionError("bit0 sender must be subset of bit1 sender")
+    repeat = get_trial_addresses(sender0, sender1, 256, cfg=c, trials=1, base_seed=20260904)[0]
+    assert_eq(addrs["all_receiver"], repeat["all_receiver"], "bit0/bit1 receiver list")
+    print("  bit0 subset of bit1 and receiver pairing: PASS")
+
+
+def write_rows(path, rows):
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(str(row) + "\n")
+
+
+def complete_rows(trials=2):
+    rows = []
+    for occ in target_occupancy_percentages:
+        for _ in range(trials):
+            rows.append([occ, occ * 10, 1, 2])
+    return rows
+
+
+def check_result_file_infrastructure():
+    print("RESULT FILE INFRASTRUCTURE")
+    with tempfile.TemporaryDirectory() as tmp:
+        valid = os.path.join(tmp, "valid.txt")
+        truncated = os.path.join(tmp, "truncated.txt")
+        malformed = os.path.join(tmp, "malformed.txt")
+        temp_only = os.path.join(tmp, "atomic.txt")
+        write_rows(valid, complete_rows(trials=2))
+        write_rows(truncated, complete_rows(trials=2)[:-1])
+        with open(malformed, "w") as f:
+            f.write("[1, 10, 3]\n")
+            f.write("not a row\n")
+        with open(f"{temp_only}.tmp.{os.getpid()}", "w") as f:
+            f.write(str([1, 10, 1]) + "\n")
+
+        assert_eq(classify_result_file(valid, 2, target_occupancy_percentages)[0], STATUS_COMPLETE, "valid synthetic result")
+        assert_eq(classify_result_file(truncated, 2, target_occupancy_percentages)[0], STATUS_INCOMPLETE, "truncated result")
+        assert_eq(classify_result_file(malformed, 2, target_occupancy_percentages)[0], STATUS_MALFORMED, "malformed result")
+        assert_eq(classify_result_file(temp_only, 2, target_occupancy_percentages)[0], STATUS_INCOMPLETE, "temp-only result")
+
+        final = os.path.join(tmp, "atomic_final.txt")
+        atomic_write_result(final, lambda f: [f.write(str(row) + "\n") for row in complete_rows(trials=1)])
+        assert_eq(classify_result_file(final, 1, target_occupancy_percentages)[0], STATUS_COMPLETE, "atomic final")
+        assert outputs_are_complete([valid], 2, target_occupancy_percentages), "complete output should skip"
+        assert not outputs_are_complete([truncated], 2, target_occupancy_percentages), "incomplete output should rerun"
+    print("  completeness, atomic writer, and skip-existing checks: PASS")
+
+
+def check_production_path_uniqueness():
+    print("PRODUCTION PATH UNIQUENESS")
+    bank_targets = {
+        1: [[0]],
+        2: [[0], [0, 1]],
+        4: [[0], [0, 1, 2, 3]],
+    }
+    result_paths = []
+    log_paths = []
+    for mode in MODES:
+        for design in DESIGNS:
+            for banks, target_lists in bank_targets.items():
+                for targets in target_lists:
+                    regions = [1] if mode == "hybrid2" else ([0, 1, 2, 3] if mode == "region4" else [0])
+                    c = cfg_for(design, mode, banks, targets=targets, regions=regions)
+                    c.output_dir = os.path.join("results", {
+                        "multibank": "multibank",
+                        "hybrid2": "hybrid_2region_75_25",
+                        "region4": "hybrid_4region",
+                    }[mode], design)
+                    result_paths.append(output_path(c, design, 0))
+                    result_paths.append(output_path(c, design, 1))
+                    target_slug = "-".join(str(x) for x in targets)
+                    region_slug = "-".join(str(x) for x in regions)
+                    log_paths.append(
+                        f"results/run_logs/{design}_{mode}_{banks}banks_targets_{target_slug}_"
+                        f"regions_{region_slug}_trials100_seed20260904.log"
+                    )
+    assert_eq(len(log_paths), 75, "75 production jobs")
+    assert_eq(len(set(result_paths)), len(result_paths), "unique result paths")
+    assert_eq(len(set(log_paths)), len(log_paths), "unique log paths")
+    print("  75-job matrix has unique result and log paths")
+
+
 def check_replacement_isolation():
     print("REPLACEMENT ISOLATION")
     c = cfg_for("normal", "region4", 1, regions=[0])
@@ -448,6 +586,10 @@ def main():
     check_capacities()
     check_invalid_ratio()
     check_workload_and_attack_semantics()
+    check_reproducible_workloads()
+    check_bit_pair_relationship()
+    check_result_file_infrastructure()
+    check_production_path_uniqueness()
     check_normal_region_reachability()
     check_address_targeting()
     check_encrypted_index_ranges()

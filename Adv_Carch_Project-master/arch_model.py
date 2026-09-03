@@ -92,9 +92,10 @@ def _tag(word_addr, num_words_per_block, global_index_bits):
 
 
 class SetAssociativeRegion:
-    def __init__(self, num_sets, way_groups):
+    def __init__(self, num_sets, way_groups, rng=None):
         self.num_sets = int(num_sets)
         self.way_groups = [int(w) for w in way_groups]
+        self.rng = rng if rng is not None else random
         self.sets = [
             [[None for _ in range(ways)] for ways in self.way_groups]
             for _ in range(self.num_sets)
@@ -110,13 +111,13 @@ class SetAssociativeRegion:
             for entry in ways:
                 if entry == tag:
                     return True
-        group_idx, set_idx = random.choice(candidates)
+        group_idx, set_idx = self.rng.choice(candidates)
         ways = self.sets[set_idx][group_idx]
         for i, entry in enumerate(ways):
             if entry is None:
                 ways[i] = tag
                 return False
-        ways[random.randrange(len(ways))] = tag
+        ways[self.rng.randrange(len(ways))] = tag
         return False
 
     def valid_lines(self):
@@ -230,10 +231,11 @@ class MirageRegion:
 
 
 class BankedArchitectureCache:
-    def __init__(self, design, cfg):
+    def __init__(self, design, cfg, rng=None):
         validate_architecture_config(cfg, design)
         self.design = design
         self.cfg = cfg
+        self.rng = rng if rng is not None else random
         self.geom = get_snuca_geometry(
             cfg.cache_size,
             cfg.num_words_per_block,
@@ -256,7 +258,7 @@ class BankedArchitectureCache:
         for bank in range(self.cfg.num_banks):
             self.bank_region[bank] = {}
             for region, groups in enumerate(self.cfg.region_way_groups):
-                self.bank_region[bank][region] = SetAssociativeRegion(sets_per_bank, groups)
+                self.bank_region[bank][region] = SetAssociativeRegion(sets_per_bank, groups, rng=self.rng)
 
     def _init_mirage(self):
         total_data = self.geom["total_blocks"]
@@ -270,7 +272,7 @@ class BankedArchitectureCache:
                 if data_entries <= 0 or data_entries % 16 != 0:
                     raise ValueError("MIRAGE region data entries must be positive and divisible by 16")
                 tag_sets = data_entries // (2 * 8)
-                self.bank_region[bank][region] = MirageRegion(data_entries, tag_sets, 2, 14)
+                self.bank_region[bank][region] = MirageRegion(data_entries, tag_sets, 2, 14, rng=self.rng)
 
     def _mirage_geometry(self):
         total_data = self.cfg.cache_size // (self.cfg.num_words_per_block * BYTES_PER_WORD)
@@ -342,8 +344,11 @@ class BankedArchitectureCache:
         return out
 
 
-def run_architecture_simulation(design, cfg, receiver_addresses, sender_addresses):
-    cache = BankedArchitectureCache(design, cfg)
+def run_architecture_simulation(design, cfg, receiver_addresses, sender_addresses, rng=None, cache_seed=None):
+    if rng is not None and cache_seed is not None:
+        raise ValueError("Specify either rng or cache_seed, not both")
+    cache_rng = rng if rng is not None else (random.Random(cache_seed) if cache_seed is not None else random)
+    cache = BankedArchitectureCache(design, cfg, rng=cache_rng)
     target_pairs = get_target_pairs(cfg)
 
     def split_by_target(addresses):

@@ -2,6 +2,7 @@ import random
 import configparser
 import math
 import argparse
+import hashlib
 MIN_ADDRESS = 0
 MAX_ADDRESS = 10000000000
 BYTES_PER_WORD = 8
@@ -38,6 +39,7 @@ class Configs:
         self.trials = 100
         self.output_dir = None
         self.skip_existing = False
+        self.seed = 20260904
         self.region_fractions = [1.0]
         self.region_way_groups = [[16]]
         self.region_skews = [[0]]
@@ -126,8 +128,47 @@ def _parse_cli_overrides(argv=None):
     p.add_argument('--trials', type=int)
     p.add_argument('--output-dir')
     p.add_argument('--skip-existing', action='store_true')
+    p.add_argument('--seed', type=int)
     args, _ = p.parse_known_args(argv)
     return args
+
+
+def stable_seed(*parts):
+    canonical = "|".join(_canonical_seed_part(part) for part in parts)
+    digest = hashlib.sha256(canonical.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def _canonical_seed_part(part):
+    if isinstance(part, (list, tuple)):
+        return "[" + ",".join(_canonical_seed_part(x) for x in part) + "]"
+    return str(part)
+
+
+def derive_workload_seed(base_seed, mode, num_banks, target_banks, attack_regions, occupancy, trial):
+    return stable_seed(
+        "workload",
+        int(base_seed),
+        mode,
+        int(num_banks),
+        tuple(target_banks),
+        tuple(attack_regions),
+        occupancy,
+        int(trial),
+    )
+
+
+def derive_cache_seed(base_seed, design, mode, num_banks, target_banks, occupancy, trial):
+    return stable_seed(
+        "cache",
+        int(base_seed),
+        design,
+        mode,
+        int(num_banks),
+        tuple(target_banks),
+        int(occupancy),
+        int(trial),
+    )
 
 
 def parse_target_banks(target_banks_text):
@@ -348,10 +389,11 @@ def print_experiment_bank_config(cli_args, total_cache_lines, capacity_per_bank,
     print(f"  Attack regions: {cli_args.attack_regions}")
     print(f"  Region fractions: {cli_args.region_fractions}")
 
-def get_new_random_addresses(unique_sender_addr, num_addresses):
+def get_new_random_addresses(unique_sender_addr, num_addresses, rng=None):
+    rng = rng if rng is not None else random
     new_addresses = []
     while(num_addresses > 0):
-        new_address = random.randint(MIN_ADDRESS, MAX_ADDRESS)
+        new_address = rng.randint(MIN_ADDRESS, MAX_ADDRESS)
         if new_address not in unique_sender_addr:
             new_addresses.append(new_address)
             unique_sender_addr.add(new_address)
@@ -446,14 +488,15 @@ def get_local_set(word_address, num_words_per_block, num_banks, sets_per_bank):
     return (block_number // num_banks) % sets_per_bank
 
 
-def get_new_random_addresses_for_banks(unique_sender_addr, num_addresses, target_banks, num_banks, num_words_per_block):
+def get_new_random_addresses_for_banks(unique_sender_addr, num_addresses, target_banks, num_banks, num_words_per_block, rng=None):
     """Generate random addresses that map to specific target banks."""
+    rng = rng if rng is not None else random
     new_addresses = []
     max_attempts = num_addresses * 1000  # Prevent infinite loop
     attempts = 0
     
     while num_addresses > 0 and attempts < max_attempts:
-        new_address = random.randint(MIN_ADDRESS, MAX_ADDRESS)
+        new_address = rng.randint(MIN_ADDRESS, MAX_ADDRESS)
         attempts += 1
         
         # Check if address is unique and maps to one of the target banks
@@ -470,8 +513,9 @@ def get_new_random_addresses_for_banks(unique_sender_addr, num_addresses, target
     return new_addresses
 
 
-def get_new_random_addresses_for_targets(unique_sender_addr, num_addresses, cfg):
+def get_new_random_addresses_for_targets(unique_sender_addr, num_addresses, cfg, rng=None):
     """Generate unique addresses matching selected physical banks and internal regions."""
+    rng = rng if rng is not None else random
     target_pairs = set(get_target_pairs(cfg))
     if num_addresses <= 0:
         return []
@@ -479,7 +523,7 @@ def get_new_random_addresses_for_targets(unique_sender_addr, num_addresses, cfg)
     max_attempts = max(10000, num_addresses * 5000)
     attempts = 0
     while num_addresses > 0 and attempts < max_attempts:
-        new_address = random.randint(MIN_ADDRESS, MAX_ADDRESS)
+        new_address = rng.randint(MIN_ADDRESS, MAX_ADDRESS)
         attempts += 1
         if new_address in unique_sender_addr:
             continue
@@ -496,25 +540,39 @@ def get_new_random_addresses_for_targets(unique_sender_addr, num_addresses, cfg)
         )
     return new_addresses
 
-def get_trial_addresses(sender_accesses_for_0, sender_accesses_for_1, max_receiver_accesses, target_banks=None, num_banks=1, num_words_per_block=8, cfg=None, trials=100):
+def get_trial_addresses(sender_accesses_for_0, sender_accesses_for_1, max_receiver_accesses, target_banks=None, num_banks=1, num_words_per_block=8, cfg=None, trials=100, base_seed=None):
     trial_addresses = {}
     for trial in range(trials):
+        if cfg is not None and base_seed is not None:
+            rng = random.Random(derive_workload_seed(
+                base_seed,
+                cfg.architecture_mode,
+                cfg.num_banks,
+                cfg.target_banks,
+                cfg.attack_regions,
+                "all",
+                trial,
+            ))
+        elif base_seed is not None:
+            rng = random.Random(stable_seed("workload", base_seed, num_banks, tuple(target_banks or ()), trial))
+        else:
+            rng = random
         unique_sender_addr = set()
         if cfg is not None:
-            sender_addrs_for_0 = get_new_random_addresses_for_targets(unique_sender_addr, sender_accesses_for_0, cfg)
-            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses_for_targets(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0, cfg)
-            all_receiver_addrs = get_new_random_addresses_for_targets(unique_sender_addr, max_receiver_accesses, cfg)
+            sender_addrs_for_0 = get_new_random_addresses_for_targets(unique_sender_addr, sender_accesses_for_0, cfg, rng=rng)
+            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses_for_targets(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0, cfg, rng=rng)
+            all_receiver_addrs = get_new_random_addresses_for_targets(unique_sender_addr, max_receiver_accesses, cfg, rng=rng)
         elif target_banks is None:
             # Single bank mode
-            sender_addrs_for_0 = get_new_random_addresses(unique_sender_addr, sender_accesses_for_0)
-            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0)
+            sender_addrs_for_0 = get_new_random_addresses(unique_sender_addr, sender_accesses_for_0, rng=rng)
+            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0, rng=rng)
             # Generate all receiver addresses (maximum needed = 40%)
-            all_receiver_addrs = get_new_random_addresses(unique_sender_addr, max_receiver_accesses)
+            all_receiver_addrs = get_new_random_addresses(unique_sender_addr, max_receiver_accesses, rng=rng)
         else:
-            sender_addrs_for_0 = get_new_random_addresses_for_banks(unique_sender_addr, sender_accesses_for_0, target_banks, num_banks, num_words_per_block)
-            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses_for_banks(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0, target_banks, num_banks, num_words_per_block)
+            sender_addrs_for_0 = get_new_random_addresses_for_banks(unique_sender_addr, sender_accesses_for_0, target_banks, num_banks, num_words_per_block, rng=rng)
+            sender_addrs_for_1 = sender_addrs_for_0 + get_new_random_addresses_for_banks(unique_sender_addr, sender_accesses_for_1 - sender_accesses_for_0, target_banks, num_banks, num_words_per_block, rng=rng)
             # Generate all receiver addresses (maximum needed = 40%)
-            all_receiver_addrs = get_new_random_addresses_for_banks(unique_sender_addr, max_receiver_accesses, target_banks, num_banks, num_words_per_block)
+            all_receiver_addrs = get_new_random_addresses_for_banks(unique_sender_addr, max_receiver_accesses, target_banks, num_banks, num_words_per_block, rng=rng)
         # Store addresses for this trial
         trial_addresses[trial] = {
                 'sender_0': sender_addrs_for_0,

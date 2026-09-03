@@ -51,10 +51,32 @@ import matplotlib.pyplot as plt
 
 DEFAULT_CACHES = ("normal", "ceaser", "ceaser_s", "mirage", "scatter")
 DEFAULT_TOTAL_CACHE_LINES = 131072
+CASE_DIRS = {
+    "multibank": "multibank",
+    "hybrid2": "hybrid_2region_75_25",
+    "region4": "hybrid_4region",
+}
 
 
 def parse_meta(path):
     base = os.path.basename(path)
+    m = re.match(
+        r"outfile_v1_bit_(0|1)_(multibank|hybrid2|region4)_banks(\d+)_"
+        r"banks_([0-9]+(?:-[0-9]+)*)_regions_([0-9]+(?:-[0-9]+)*)\.txt$",
+        base,
+    )
+    if m:
+        return {
+            "bit": int(m.group(1)),
+            "ratio": "region-aware",
+            "mode": m.group(2),
+            "attack": m.group(2),
+            "num_banks": int(m.group(3)),
+            "target_banks": tuple(int(x) for x in m.group(4).split("-")),
+            "attack_regions": tuple(int(x) for x in m.group(5).split("-")),
+            "legacy_attack_count": None,
+        }
+
     m = re.match(r"outfile_v1_bit_(0|1)_([^_]+)_(.+)\.txt$", base)
     if not m:
         return None
@@ -71,9 +93,11 @@ def parse_meta(path):
         return {
             "bit": bit,
             "ratio": ratio,
+            "mode": "legacy",
             "attack": attack,
             "num_banks": num_banks,
             "target_banks": target_banks,
+            "attack_regions": (0,),
             "legacy_attack_count": None,
         }
 
@@ -85,18 +109,22 @@ def parse_meta(path):
         return {
             "bit": bit,
             "ratio": ratio,
+            "mode": "legacy",
             "attack": attack,
             "num_banks": num_banks,
             "target_banks": tuple(range(attack_count)),
+            "attack_regions": (0,),
             "legacy_attack_count": attack_count,
         }
 
     return {
         "bit": bit,
         "ratio": ratio,
+        "mode": "legacy",
         "attack": attack_part,
         "num_banks": 1,
         "target_banks": (0,),
+        "attack_regions": (0,),
         "legacy_attack_count": None,
     }
 
@@ -107,20 +135,27 @@ def scenario_key(meta):
         meta["attack"],
         meta["num_banks"],
         meta["target_banks"],
+        meta["attack_regions"],
         meta["legacy_attack_count"],
     )
 
 
 def scenario_tag(meta):
     targets = "-".join(str(x) for x in meta["target_banks"])
-    return f"banks{meta['num_banks']}_targets_{targets}"
+    regions = "-".join(str(x) for x in meta["attack_regions"])
+    return f"{meta['mode']}_banks{meta['num_banks']}_targets_{targets}_regions_{regions}"
 
 
 def scenario_label(meta):
     targets = ",".join(str(x) for x in meta["target_banks"])
+    regions = ",".join(str(x) for x in meta["attack_regions"])
     if meta["num_banks"] == 1:
-        return "1 bank"
-    return f"{meta['num_banks']} banks, targets [{targets}]"
+        banks = "1 bank"
+    else:
+        banks = f"{meta['num_banks']} banks, targets [{targets}]"
+    if meta["mode"] in ("hybrid2", "region4"):
+        return f"{meta['mode']}, {banks}, regions [{regions}]"
+    return banks
 
 
 def bank_folder_name(num_banks):
@@ -220,15 +255,48 @@ def paired_rows_for_occupancy(d0, d1, occupancy):
     return idx0[:n], idx1[:n]
 
 
-def bank_ids(meta, num_cols):
+def observation_ids(meta, num_cols):
     targets = meta["target_banks"]
+    regions = meta["attack_regions"]
+    expected = [(bank, region) for bank in targets for region in regions]
+    if len(expected) == num_cols:
+        return expected
     if len(targets) == num_cols:
-        return list(targets)
-    return list(range(num_cols))
+        return [(bank, None) for bank in targets]
+    return [(idx, None) for idx in range(num_cols)]
 
 
-def plot_cache(cache, base_dir, total_cache_lines):
-    folder = os.path.join(base_dir, cache)
+def observation_label(observation):
+    bank, region = observation
+    if region is None:
+        return f"Bank {bank}"
+    return f"Bank {bank}, region {region}"
+
+
+def x_axis_label(meta):
+    if meta["mode"] == "hybrid2":
+        return "Receiver accesses (% of selected physical-bank capacity)"
+    if meta["mode"] == "region4":
+        return "Receiver accesses (% of selected physical-bank capacity)"
+    return "Receiver accesses (% of selected physical-bank capacity)"
+
+
+def denominator_series(meta, delta, capacity_per_bank):
+    whole_bank = 100.0 * delta / capacity_per_bank
+    if meta["mode"] == "hybrid2":
+        small_region_capacity = 0.25 * capacity_per_bank
+        return {
+            "selected_bank_capacity": whole_bank,
+            "attacked_small_region_capacity": 100.0 * delta / small_region_capacity,
+        }
+    return {"selected_bank_capacity": whole_bank}
+
+
+def plot_cache(cache, base_dir, total_cache_lines, mode=None):
+    if mode in CASE_DIRS:
+        folder = os.path.join(base_dir, CASE_DIRS[mode], cache)
+    else:
+        folder = os.path.join(base_dir, cache)
     if not os.path.isdir(folder):
         print(f"[WARN] missing cache folder: {folder}")
         return
@@ -261,8 +329,9 @@ def plot_cache(cache, base_dir, total_cache_lines):
 
         capacity_per_bank = total_cache_lines / num_banks
         num_cols = d0["misses"].shape[1]
-        ids = bank_ids(meta, num_cols)
+        ids = observation_ids(meta, num_cols)
         targets_text = ",".join(str(x) for x in meta["target_banks"])
+        regions_text = ",".join(str(x) for x in meta["attack_regions"])
 
         common_occ = sorted(
             set(int(x) for x in np.unique(d0["occupancy"]))
@@ -272,9 +341,13 @@ def plot_cache(cache, base_dir, total_cache_lines):
         bank_dir = os.path.join(out_root, bank_folder_name(num_banks))
         os.makedirs(bank_dir, exist_ok=True)
 
-        per_bank_series = {col: {"occ": [], "mean": [], "ci": []} for col in range(num_cols)}
+        per_bank_series = {
+            col: defaultdict(lambda: {"occ": [], "mean": [], "ci": []})
+            for col in range(num_cols)
+        }
         aggregate_series = {"occ": [], "mean": [], "ci": []}
         raw_aggregate_series = {"occ": [], "mean": [], "ci": []}
+        bank_aggregate_series = defaultdict(lambda: {"occ": [], "mean": [], "ci": []})
 
         for occ in common_occ:
             paired = paired_rows_for_occupancy(d0, d1, occ)
@@ -284,12 +357,23 @@ def plot_cache(cache, base_dir, total_cache_lines):
             i0, i1 = paired
             delta = d1["misses"][i1, :] - d0["misses"][i0, :]
 
-            # Individual-bank normalization by that bank's physical capacity.
             for col in range(num_cols):
-                normalized = 100.0 * delta[:, col] / capacity_per_bank
-                per_bank_series[col]["occ"].append(occ)
-                per_bank_series[col]["mean"].append(float(normalized.mean()))
-                per_bank_series[col]["ci"].append(float(ci95(normalized)))
+                for denom_name, normalized in denominator_series(meta, delta[:, col], capacity_per_bank).items():
+                    series = per_bank_series[col][denom_name]
+                    series["occ"].append(occ)
+                    series["mean"].append(float(normalized.mean()))
+                    series["ci"].append(float(ci95(normalized)))
+
+            if meta["mode"] == "region4":
+                banks = sorted(set(bank for bank, _ in ids))
+                for bank in banks:
+                    cols = [idx for idx, obs in enumerate(ids) if obs[0] == bank]
+                    bank_delta = delta[:, cols].sum(axis=1)
+                    normalized = 100.0 * bank_delta / capacity_per_bank
+                    series = bank_aggregate_series[bank]
+                    series["occ"].append(occ)
+                    series["mean"].append(float(normalized.mean()))
+                    series["ci"].append(float(ci95(normalized)))
 
             # Aggregate raw delta across attacked-bank columns.
             aggregate_delta = delta.sum(axis=1)
@@ -321,11 +405,24 @@ def plot_cache(cache, base_dir, total_cache_lines):
                         "cache": cache,
                         "num_banks": num_banks,
                         "target_banks": targets_text,
-                        "bank": ids[col],
+                        "attack_regions": regions_text,
+                        "observation": observation_label(ids[col]),
+                        "bank": ids[col][0],
+                        "region": "" if ids[col][1] is None else ids[col][1],
                         "occupancy_pct": occ,
                         "capacity_per_bank_lines": int(capacity_per_bank),
-                        "mean_capacity_normalized_delta_pct": per_bank_series[col]["mean"][-1],
-                        "ci95_capacity_normalized_delta_pct": per_bank_series[col]["ci"][-1],
+                        "mean_capacity_normalized_delta_pct": per_bank_series[col]["selected_bank_capacity"]["mean"][-1],
+                        "ci95_capacity_normalized_delta_pct": per_bank_series[col]["selected_bank_capacity"]["ci"][-1],
+                        "mean_small_region_normalized_delta_pct": (
+                            per_bank_series[col]["attacked_small_region_capacity"]["mean"][-1]
+                            if "attacked_small_region_capacity" in per_bank_series[col]
+                            else ""
+                        ),
+                        "ci95_small_region_normalized_delta_pct": (
+                            per_bank_series[col]["attacked_small_region_capacity"]["ci"][-1]
+                            if "attacked_small_region_capacity" in per_bank_series[col]
+                            else ""
+                        ),
                         "mean_aggregate_raw_delta_misses": raw_aggregate_series["mean"][-1],
                         "ci95_aggregate_raw_delta_misses": raw_aggregate_series["ci"][-1],
                         "mean_aggregate_excess_miss_rate_pct": aggregate_series["mean"][-1],
@@ -333,33 +430,60 @@ def plot_cache(cache, base_dir, total_cache_lines):
                     }
                 )
 
-        # Individual physical-bank plots.
+        # Individual observation plots. In region modes, one column is a bank-region pair.
         for col in range(num_cols):
-            series = per_bank_series[col]
-            bank_id = ids[col]
+            bank_id = ids[col][0]
+            obs_label = observation_label(ids[col])
 
             fig, ax = plt.subplots(figsize=(9, 5.5))
-            x = np.asarray(series["occ"], dtype=float)
-            y = np.asarray(series["mean"], dtype=float)
-            ci = np.asarray(series["ci"], dtype=float)
+            for denom_name, series in per_bank_series[col].items():
+                x = np.asarray(series["occ"], dtype=float)
+                y = np.asarray(series["mean"], dtype=float)
+                ci = np.asarray(series["ci"], dtype=float)
+                label = "% of selected physical-bank capacity"
+                if denom_name == "attacked_small_region_capacity":
+                    label = "% of attacked 25% small-region capacity"
+                ax.plot(x, y, marker="o", label=label)
+                ax.fill_between(x, y - ci, y + ci, alpha=0.14)
 
-            ax.plot(x, y, marker="o")
-            ax.fill_between(x, y - ci, y + ci, alpha=0.18)
             ax.axhline(0, linewidth=1)
-            ax.set_xlabel("Cache occupancy (%)")
-            ax.set_ylabel("Capacity-normalized Δ misses (% of physical bank capacity)")
+            ax.set_xlabel(x_axis_label(meta))
+            ax.set_ylabel("Capacity-normalized Δ misses")
             ax.set_title(
                 f"{cache} | {num_banks}-bank setup | "
-                f"targets [{targets_text}] | Bank {bank_id}"
+                f"targets [{targets_text}] | {obs_label}"
             )
             ax.grid(True, alpha=0.25)
+            if len(per_bank_series[col]) > 1:
+                ax.legend()
 
             fig.tight_layout()
             fname = (
                 f"{cache}_{scenario_tag(meta)}_bank{bank_id}"
+                f"{'_region' + str(ids[col][1]) if ids[col][1] is not None else ''}"
                 "_capacity_normalized_delta.png"
             )
             path = os.path.join(bank_dir, fname)
+            fig.savefig(path, dpi=180)
+            plt.close(fig)
+            print(f"[SAVED] {path}")
+
+        if bank_aggregate_series:
+            fig, ax = plt.subplots(figsize=(9, 5.5))
+            for bank, series in sorted(bank_aggregate_series.items()):
+                x = np.asarray(series["occ"], dtype=float)
+                y = np.asarray(series["mean"], dtype=float)
+                ci = np.asarray(series["ci"], dtype=float)
+                ax.plot(x, y, marker="o", label=f"Bank {bank}, all attacked regions")
+                ax.fill_between(x, y - ci, y + ci, alpha=0.10)
+            ax.axhline(0, linewidth=1)
+            ax.set_xlabel(x_axis_label(meta))
+            ax.set_ylabel("Δ misses aggregated across regions (% of physical bank capacity)")
+            ax.set_title(f"{cache} | {scenario_label(meta)} | per-bank region aggregate")
+            ax.grid(True, alpha=0.25)
+            ax.legend()
+            fig.tight_layout()
+            path = os.path.join(bank_dir, f"{cache}_{scenario_tag(meta)}_bank_region_aggregate.png")
             fig.savefig(path, dpi=180)
             plt.close(fig)
             print(f"[SAVED] {path}")
@@ -373,7 +497,7 @@ def plot_cache(cache, base_dir, total_cache_lines):
         ax.plot(x, y, marker="o")
         ax.fill_between(x, y - ci, y + ci, alpha=0.18)
         ax.axhline(0, linewidth=1)
-        ax.set_xlabel("Cache occupancy (%)")
+        ax.set_xlabel(x_axis_label(meta))
         ax.set_ylabel("Aggregate excess receiver miss rate (%)")
         ax.set_title(
             f"{cache} | {scenario_label(meta)} | aggregate attacked-bank effect"
@@ -410,7 +534,7 @@ def plot_cache(cache, base_dir, total_cache_lines):
             ax.fill_between(x, y - ci, y + ci, alpha=0.10)
 
         ax.axhline(0, linewidth=1)
-        ax.set_xlabel("Cache occupancy (%)")
+        ax.set_xlabel("Receiver accesses (% of selected physical-bank capacity)")
         ax.set_ylabel("Aggregate excess receiver miss rate (%)")
         ax.set_title(
             f"{cache}: normalized aggregate bit-induced miss effect"
@@ -434,11 +558,16 @@ def plot_cache(cache, base_dir, total_cache_lines):
             "cache",
             "num_banks",
             "target_banks",
+            "attack_regions",
+            "observation",
             "bank",
+            "region",
             "occupancy_pct",
             "capacity_per_bank_lines",
             "mean_capacity_normalized_delta_pct",
             "ci95_capacity_normalized_delta_pct",
+            "mean_small_region_normalized_delta_pct",
+            "ci95_small_region_normalized_delta_pct",
             "mean_aggregate_raw_delta_misses",
             "ci95_aggregate_raw_delta_misses",
             "mean_aggregate_excess_miss_rate_pct",
@@ -470,11 +599,18 @@ def main():
         default=list(DEFAULT_CACHES),
         help="Cache folders to process",
     )
+    parser.add_argument(
+        "--modes",
+        nargs="*",
+        default=["multibank", "hybrid2", "region4"],
+        help="Region-aware result modes to process",
+    )
     args = parser.parse_args()
 
-    for cache in args.caches:
-        print(f"\n=== {cache}: normalized delta ===")
-        plot_cache(cache, args.base_dir, args.total_cache_lines)
+    for mode in args.modes:
+        for cache in args.caches:
+            print(f"\n=== {mode}/{cache}: normalized delta ===")
+            plot_cache(cache, args.base_dir, args.total_cache_lines, mode=mode)
 
 
 if __name__ == "__main__":
