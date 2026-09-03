@@ -50,6 +50,9 @@ def parse_meta(path):
     Returns a scenario dictionary.
 
     Supported filenames:
+      outfile_v1_bit_0_multibank_banks1_banks_0_regions_0.txt
+      outfile_v1_bit_0_hybrid2_banks2_banks_0-1_regions_1.txt
+      outfile_v1_bit_0_region4_banks4_banks_0-1-2-3_regions_0-1-2-3.txt
       outfile_v1_bit_0_0.5_simultaneous.txt
       outfile_v1_bit_0_0.5_simultaneous_banks2_banks_0.txt
       outfile_v1_bit_0_0.5_simultaneous_banks2_banks_0-1.txt
@@ -58,6 +61,22 @@ def parse_meta(path):
     Legacy banksN_attackM names are also accepted.
     """
     base = os.path.basename(path)
+    current = re.match(
+        r"outfile_v1_bit_(0|1)_(multibank|hybrid2|region4)_"
+        r"banks(\d+)_banks_([0-9]+(?:-[0-9]+)*)_regions_([0-9]+(?:-[0-9]+)*)\.txt$",
+        base,
+    )
+    if current:
+        return {
+            "bit": int(current.group(1)),
+            "ratio": current.group(2),
+            "attack": current.group(2),
+            "num_banks": int(current.group(3)),
+            "target_banks": tuple(int(x) for x in current.group(4).split("-")),
+            "target_regions": tuple(int(x) for x in current.group(5).split("-")),
+            "legacy_attack_count": None,
+        }
+
     m = re.match(r"outfile_v1_bit_(0|1)_([^_]+)_(.+)\.txt$", base)
     if not m:
         return None
@@ -220,6 +239,10 @@ def align_pair(d0, d1):
 
 def bank_labels(meta, num_cols):
     targets = meta["target_banks"]
+    regions = meta.get("target_regions", (0,))
+    pairs = [(bank, region) for bank in targets for region in regions]
+    if len(pairs) == num_cols:
+        return [f"Bank {b} Region {r}" for b, r in pairs], pairs
     if len(targets) == num_cols:
         return [f"Bank {b}" for b in targets], list(targets)
     return [f"Bank {i}" for i in range(num_cols)], list(range(num_cols))
@@ -430,11 +453,27 @@ def main():
         default=list(DEFAULT_CACHES),
         help="Cache folders to process",
     )
+    parser.add_argument(
+        "--all-cases",
+        action="store_true",
+        help="Process all 16-way case directories under results/",
+    )
     args = parser.parse_args()
 
-    for cache in args.caches:
-        print(f"\n=== {cache}: bit divergence ===")
-        plot_cache(cache, args.base_dir)
+    base_dirs = [args.base_dir]
+    if args.all_cases:
+        base_dirs = [
+            os.path.join(args.base_dir, "multibank"),
+            os.path.join(args.base_dir, "hybrid_2region_75_25"),
+            os.path.join(args.base_dir, "hybrid_4region"),
+        ]
+
+    for base_dir in base_dirs:
+        if not os.path.isdir(base_dir):
+            continue
+        for cache in args.caches:
+            print(f"\n=== {base_dir}/{cache}: bit divergence ===")
+            plot_cache(cache, base_dir)
 
 
 if __name__ == "__main__":

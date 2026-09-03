@@ -1,167 +1,39 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Simulator for occupancy-based covert channel with S-NUCA Normal cache."""
-
-import math
 import os
 import sys
-from collections import OrderedDict
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from common import get_bank_id, get_snuca_geometry, resolve_target_banks, validate_target_banks
-from hybrid_wrapper_cache import HybridWrapperCache
-from reference import Reference
+from arch_model import run_architecture_simulation
+from common import Configs, configure_architecture, validate_target_banks
 
 
 class Simulator(object):
+    DESIGN = "normal"
 
-    def get_bank_id(self, address, num_banks, num_words_per_block):
-        return get_bank_id(address, num_banks, num_words_per_block)
-
-    def filter_addresses_by_banks(self, addresses, target_banks, num_banks, num_words_per_block):
-        """Filter addresses to only those that map to target banks."""
-        if target_banks is None or num_banks == 1:
-            return addresses
-        return [addr for addr in addresses if self.get_bank_id(addr, num_banks, num_words_per_block) in target_banks]
-
-    def get_addr_refs(self, word_addrs, num_addr_bits, num_offset_bits, num_index_bits,
-                      num_tag_bits, num_partitions, ways_per_partition, *,
-                      target_region=0, num_banks=1, sets_per_bank=None):
-        return [
-            Reference(
-                word_addr,
-                num_addr_bits,
-                num_offset_bits,
-                num_index_bits,
-                num_tag_bits,
-                num_partitions,
-                ways_per_partition,
-                target_region=target_region,
-                num_banks=num_banks,
-                sets_per_bank=sets_per_bank,
-                snuca_indexing=True,
-            )
-            for word_addr in word_addrs
-        ]
-
-    def emulate_timing(self, refs):
-        t = OrderedDict()
-        for ref in refs:
-            t[str(ref.word_addr)] = 200 if (ref.cache_status.name == 'hit') else 600
-        return t
-
-    def run_simulation(self,
-                       num_blocks_per_set,
-                       num_words_per_block,
-                       cache_size,
-                       num_partitions,
-                       replacement_policy,
-                       num_addr_bits,
-                       receiver_addresses,
-                       sender_addresses,
-                       region_split_ratio=0.3,
-                       attack_mode='region0',
-                       num_banks=1,
-                       banks_to_attack=1,
-                       target_banks=None):
-
-        # -------- S-NUCA geometry -----------
-        geom = get_snuca_geometry(
-            cache_size, num_words_per_block, num_blocks_per_set, num_banks
-        )
-        global_index_bits = geom["global_index_bits"]
-        num_index_bits = geom["local_index_bits"]
-        num_sets = geom["sets_per_bank"]
-
-        # address fields
-        all_addrs = receiver_addresses + sender_addresses
-        num_addr_bits = max(num_addr_bits, int(math.log2(max(all_addrs))) + 1)
-        num_offset_bits = int(math.log2(num_words_per_block))
-        num_tag_bits = num_addr_bits - global_index_bits - num_offset_bits
-        ways_per_partition = max(1, num_blocks_per_set // num_partitions)
-
-        num_regions = num_banks
-        if target_banks is None:
-            target_regions = resolve_target_banks(attack_mode, num_banks, banks_to_attack)
-        else:
-            target_regions = validate_target_banks(target_banks, num_banks)
-
-        region_addrs = {r: {'recv': [], 'send': []} for r in target_regions}
-        for addr in receiver_addresses:
-            bid = self.get_bank_id(addr, num_banks, num_words_per_block)
-            if bid in region_addrs:
-                region_addrs[bid]['recv'].append(addr)
-        for addr in sender_addresses:
-            bid = self.get_bank_id(addr, num_banks, num_words_per_block)
-            if bid in region_addrs:
-                region_addrs[bid]['send'].append(addr)
-        
-        # Create N-region cache
-        cache = HybridWrapperCache(
-            num_regions=num_regions,
-            region_split_ratio=region_split_ratio,
-            num_sets=num_sets,
-            num_index_bits=num_index_bits,
-            num_partitions=num_partitions,
-            num_blocks_per_set=num_blocks_per_set
-        )
-        
-        # Build refs grouped by region
-        recv_refs_by_region = [[] for _ in range(len(target_regions))]
-        send_refs_by_region = [[] for _ in range(len(target_regions))]
-        
-        for i, region_id in enumerate(target_regions):
-            addrs = region_addrs[region_id]
-            
-            if addrs['recv']:
-                refs = self.get_addr_refs(
-                    addrs['recv'], num_addr_bits, num_offset_bits,
-                    num_index_bits, num_tag_bits, num_partitions, ways_per_partition,
-                    target_region=region_id, num_banks=num_banks, sets_per_bank=num_sets
-                )
-                recv_refs_by_region[i] = refs
-            
-            if addrs['send']:
-                refs = self.get_addr_refs(
-                    addrs['send'], num_addr_bits, num_offset_bits,
-                    num_index_bits, num_tag_bits, num_partitions, ways_per_partition,
-                    target_region=region_id, num_banks=num_banks, sets_per_bank=num_sets
-                )
-                send_refs_by_region[i] = refs
-        
-        # Run simulation: receiver -> sender -> receiver
-        for i in range(len(target_regions)):
-            if recv_refs_by_region[i]:
-                cache.read_refs_explicit(num_words_per_block, replacement_policy, 
-                                       recv_refs_by_region[i], strict_region=True)
-        
-        for i in range(len(target_regions)):
-            if send_refs_by_region[i]:
-                cache.read_refs_explicit(num_words_per_block, replacement_policy,
-                                       send_refs_by_region[i], strict_region=True)
-        
-        # Re-access receiver and collect timings
-        recv_re_by_region = []
-        for i in range(len(target_regions)):
-            if recv_refs_by_region[i]:
-                addrs = [ref.word_addr for ref in recv_refs_by_region[i]]
-                refs = self.get_addr_refs(
-                    addrs, num_addr_bits, num_offset_bits,
-                    num_index_bits, num_tag_bits, num_partitions, ways_per_partition,
-                    target_region=target_regions[i], num_banks=num_banks, sets_per_bank=num_sets
-                )
-                cache.read_refs_explicit(num_words_per_block, replacement_policy, refs, strict_region=True)
-                recv_re_by_region.append(refs)
-            else:
-                recv_re_by_region.append([])
-        
-        # cache.print_occupancy_stats()
-        
-        # Build result dict: region0, region1, region2, ...
-        result = {}
-        for i, region_id in enumerate(target_regions):
-            if recv_re_by_region[i]:
-                timings = self.emulate_timing(recv_re_by_region[i])
-                result[f'region{region_id}'] = timings
-        
-        return result
+    def run_simulation(self, num_blocks_per_set, num_words_per_block, cache_size,
+                       num_partitions, replacement_policy, num_addr_bits,
+                       receiver_addresses, sender_addresses, region_split_ratio=0.75,
+                       attack_mode="simultaneous", num_banks=1, banks_to_attack=1,
+                       target_banks=None, architecture_mode="multibank",
+                       num_regions=1, attack_regions=None, num_additional_tags=6):
+        cfg = Configs()
+        cfg.cache_size = cache_size
+        cfg.num_blocks_per_set = num_blocks_per_set
+        cfg.num_words_per_block = num_words_per_block
+        cfg.num_partitions = num_partitions
+        cfg.num_additional_tags = num_additional_tags
+        cfg.replacement_policy = replacement_policy
+        cfg.num_addr_bits = num_addr_bits
+        cfg.region_split_ratio = region_split_ratio
+        cfg.attack_mode = attack_mode
+        cfg.num_banks = num_banks
+        cfg.target_banks = validate_target_banks(target_banks or list(range(banks_to_attack)), num_banks)
+        cfg.banks_to_attack = len(cfg.target_banks)
+        cfg.architecture_mode = architecture_mode
+        cfg.num_regions = num_regions
+        cfg.attack_regions = attack_regions or ([1] if architecture_mode == "hybrid2" else ([0, 1, 2, 3] if architecture_mode == "region4" else [0]))
+        cfg.strict_region = True
+        cfg.strict_integer_split = True
+        cfg.workload_mode = "default"
+        configure_architecture(cfg)
+        return run_architecture_simulation(self.DESIGN, cfg, receiver_addresses, sender_addresses)

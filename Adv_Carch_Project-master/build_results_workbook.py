@@ -35,10 +35,9 @@ CACHE_DIR_MAP = {
 
 
 FILENAME_RE = re.compile(
-    r"^outfile_v1_bit_(?P<bit>[01])_"
-    r"(?P<ratio>[^_]+)_"
-    r"(?P<attack>.+?)"
-    r"(?:_banks(?P<num_banks>\d+)_attack(?P<banks_to_attack>\d+))?"
+    r"^outfile_v1_bit_(?P<bit>[01])_(?P<architecture_mode>multibank|hybrid2|region4)_"
+    r"banks(?P<num_banks>\d+)_banks_(?P<target_banks>[0-9]+(?:-[0-9]+)*)_"
+    r"regions_(?P<target_regions>[0-9]+(?:-[0-9]+)*)"
     r"\.txt$"
 )
 
@@ -71,10 +70,13 @@ def parse_filename(path: Path) -> Dict[str, object]:
     info = m.groupdict()
     return {
         "bit": int(info["bit"]),
-        "ratio": info["ratio"],
-        "attack_mode": info["attack"],
-        "num_banks": int(info["num_banks"]) if info["num_banks"] else None,
-        "banks_to_attack": int(info["banks_to_attack"]) if info["banks_to_attack"] else None,
+        "ratio": "0.75" if info["architecture_mode"] == "hybrid2" else "",
+        "attack_mode": info["architecture_mode"],
+        "architecture_mode": info["architecture_mode"],
+        "num_banks": int(info["num_banks"]),
+        "target_banks": info["target_banks"].replace("-", ","),
+        "target_regions": info["target_regions"].replace("-", ","),
+        "banks_to_attack": len(info["target_banks"].split("-")),
     }
 
 
@@ -119,12 +121,13 @@ def build_tables() -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame],
     raw_by_cache: Dict[str, List[Dict[str, object]]] = {}
     avg_by_cache: Dict[str, List[Dict[str, object]]] = {}
 
-    result_files = sorted(RESULTS_DIR.glob("*/outfile_v1_bit_*.txt"))
+    result_files = sorted(RESULTS_DIR.glob("*/*/outfile_v1_bit_*.txt"))
     if not result_files:
         raise FileNotFoundError(f"No result files found under {RESULTS_DIR}")
 
     for path in result_files:
         cache_name = path.parent.name
+        case_name = path.parent.parent.name
         cfg = parse_config(cache_name)
         file_info = parse_filename(path)
         fmt, rows, max_miss_cols = parse_rows(path)
@@ -141,11 +144,15 @@ def build_tables() -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame],
 
             row_dict: Dict[str, object] = {
                 "cache": cache_name,
+                "case": case_name,
                 "bit": file_info["bit"],
                 "ratio": file_info["ratio"],
                 "attack_mode": file_info["attack_mode"],
+                "architecture_mode": file_info["architecture_mode"],
                 "num_banks": file_info["num_banks"],
                 "banks_to_attack": file_info["banks_to_attack"],
+                "target_banks": file_info["target_banks"],
+                "target_regions": file_info["target_regions"],
                 "file_format": fmt,
                 "occupancy_pct": occ,
                 "receiver_accesses": rec_acc,
@@ -172,11 +179,15 @@ def build_tables() -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, pd.DataFrame],
             receiver_accesses = int(occ_rows[0][1])
             avg_dict: Dict[str, object] = {
                 "cache": cache_name,
+                "case": case_name,
                 "bit": file_info["bit"],
                 "ratio": file_info["ratio"],
                 "attack_mode": file_info["attack_mode"],
+                "architecture_mode": file_info["architecture_mode"],
                 "num_banks": file_info["num_banks"],
                 "banks_to_attack": file_info["banks_to_attack"],
+                "target_banks": file_info["target_banks"],
+                "target_regions": file_info["target_regions"],
                 "file_format": fmt,
                 "occupancy_pct": occ,
                 "receiver_accesses": receiver_accesses,

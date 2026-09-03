@@ -81,10 +81,10 @@ def _extract_meta(filename: str):
     Return:
       (bit, ratio, attack, num_banks, target_banks, legacy_attack_count)
 
-    Supported new filenames:
-      outfile_v1_bit_0_0.5_simultaneous_banks4_banks_0.txt
-      outfile_v1_bit_0_0.5_simultaneous_banks4_banks_0-2.txt
-      outfile_v1_bit_0_0.5_simultaneous_banks8_banks_1-4-6.txt
+    Supported 16-way filenames:
+      outfile_v1_bit_0_multibank_banks4_banks_0_regions_0.txt
+      outfile_v1_bit_0_hybrid2_banks2_banks_0-1_regions_1.txt
+      outfile_v1_bit_0_region4_banks4_banks_0-1-2-3_regions_0-1-2-3.txt
 
     Supported legacy filename:
       outfile_v1_bit_0_0.5_simultaneous_banks4_attack2.txt
@@ -93,6 +93,19 @@ def _extract_meta(filename: str):
       outfile_v1_bit_0_0.5_simultaneous.txt
     """
     base = os.path.basename(filename)
+    current = re.match(
+        r"outfile_v1_bit_(0|1)_(multibank|hybrid2|region4)_"
+        r"banks(\d+)_banks_([0-9]+(?:-[0-9]+)*)_regions_([0-9]+(?:-[0-9]+)*)\.txt$",
+        base,
+    )
+    if current:
+        bit = current.group(1)
+        arch = current.group(2)
+        num_banks = int(current.group(3))
+        target_banks = tuple(int(x) for x in current.group(4).split("-"))
+        target_regions = tuple(int(x) for x in current.group(5).split("-"))
+        return bit, arch, arch, num_banks, target_banks, target_regions
+
     m = re.match(r"outfile_v1_bit_(0|1)_([^_]+)_(.+)\.txt$", base)
     if not m:
         return None
@@ -316,5 +329,13 @@ def plot_bit_diff_misses(cache: str, base_dir: str = "results"):
 
 
 if __name__ == "__main__":
-    for cache in ("normal", "ceaser", "ceaser_s", "mirage", "scatter"):
-        plot_bit_diff_misses(cache, base_dir="results")
+    case_dirs = (
+        "results/multibank",
+        "results/hybrid_2region_75_25",
+        "results/hybrid_4region",
+    )
+    for base_dir in case_dirs:
+        if not os.path.isdir(base_dir):
+            continue
+        for cache in ("normal", "ceaser", "ceaser_s", "mirage", "scatter"):
+            plot_bit_diff_misses(cache, base_dir=base_dir)
