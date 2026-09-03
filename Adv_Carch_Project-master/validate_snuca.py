@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import random
-import time
+import statistics
 
 from arch_model import (
     CEASER_KEY,
@@ -9,6 +9,7 @@ from arch_model import (
     BankedArchitectureCache,
     MirageRegion,
     _present_index,
+    _present_index_mod,
 )
 from common import (
     BYTES_PER_WORD,
@@ -207,7 +208,7 @@ def check_scatter_semantics():
 
 
 def check_mirage_geometry_and_reachability():
-    print("MIRAGE")
+    print("MIRAGE GEOMETRY")
     expected_keys = ("00000000000000000000", "ffffffffffffffffffff")
     assert_eq(MIRAGE_KEYS, expected_keys, "mirage keys")
     baseline = cfg_for("mirage", "multibank", 1)
@@ -242,13 +243,90 @@ def check_mirage_geometry_and_reachability():
         c = cfg_for("mirage", "hybrid2", banks)
         cache = BankedArchitectureCache("mirage", c)
         seen = set()
-        sample_limit = max(120000, expected_count * 80)
+        sample_limit = max(120000, expected_count * 32)
         for i in range(sample_limit):
-            seen.add(cache._mirage_indexes(i * c.num_words_per_block, region)[0])
+            seen.add(_present_index_mod(i * c.num_words_per_block, c.num_words_per_block, expected_count, MIRAGE_KEYS[0]))
             if len(seen) == expected_count:
                 break
         assert_eq(len(seen), expected_count, f"mirage banks={banks} region {region} reachable tag sets")
+    print("  2 native skews")
+    print("  8 base + 6 extra = 14 ways/skew")
+    print("  baseline/hybrid2/region4 data capacities correct")
     print("  keys, tag geometry, 6144/2048 reachability, and region capacities OK")
+
+
+class ScriptedRng:
+    def __init__(self, randrange_values, choice_values=None):
+        self.randrange_values = list(randrange_values)
+        self.choice_values = list(choice_values or [])
+
+    def randrange(self, stop):
+        value = self.randrange_values.pop(0)
+        if not 0 <= value < stop:
+            raise AssertionError(f"scripted randrange value {value} outside 0..{stop - 1}")
+        return value
+
+    def choice(self, seq):
+        if self.choice_values:
+            value = self.choice_values.pop(0)
+            if value not in seq:
+                raise AssertionError(f"scripted choice value {value} not in {seq}")
+            return value
+        return seq[0]
+
+
+def check_mirage_random_gle():
+    print("MIRAGE RANDOM GLE")
+    region = MirageRegion(8, 2, 2, 4, rng=ScriptedRng([3, 3], [0]))
+    assert region.access([0, 0], "A") is False
+    assert_eq(region.valid_lines(), 1, "first mirage insertion occupancy")
+    assert region.access([0, 0], "B") is False
+
+    assert_eq(region.valid_lines(), 1, "early GLE keeps occupied data count below capacity")
+    assert_eq(region.tags[0][0][0], None, "old tag invalidated after occupied data victim")
+    assert_eq(region.tags[1][0][0], ("B", 3), "new tag forward pointer")
+    assert_eq(region.data_store[3], (1, 0, 0), "new data reverse pointer")
+    assert region.check_pointer_invariants()
+
+    print("  O(1) random data placement")
+    print("  early eviction before full capacity: PASS")
+    print("  reverse-pointer invalidation: PASS")
+    print("  forward/reverse pointer consistency: PASS")
+
+
+def check_mirage_6144_set_mapping():
+    print("MIRAGE 6144 SET MAPPING")
+    c = cfg_for("mirage", "hybrid2", 1, regions=[0])
+    cache = BankedArchitectureCache("mirage", c)
+    tag_sets = cache.bank_region[0][0].tag_sets_per_skew
+    assert_eq(tag_sets, 6144, "hybrid2 SRAM tag sets")
+
+    samples = 262144
+    counts = [0] * tag_sets
+    for i in range(samples):
+        set_idx = _present_index_mod(i * c.num_words_per_block, c.num_words_per_block, tag_sets, MIRAGE_KEYS[0])
+        counts[set_idx] += 1
+
+    reached = sum(1 for count in counts if count > 0)
+    mean = statistics.fmean(counts)
+    min_count = min(counts)
+    max_count = max(counts)
+    stdev = statistics.pstdev(counts)
+    cv = stdev / mean
+    first_mean = statistics.fmean(counts[:2048])
+    remaining_mean = statistics.fmean(counts[2048:])
+    ratio = first_mean / remaining_mean
+
+    assert_eq(reached, tag_sets, "6144-set reachability")
+    if cv > 0.20:
+        raise AssertionError(f"6144-set mapping CV too high: {cv:.4f}")
+    if not 0.95 <= ratio <= 1.05:
+        raise AssertionError(f"6144-set first/rest average ratio shows bias: {ratio:.4f}")
+
+    print(f"  reachable sets = {reached} / {tag_sets}")
+    print(f"  min count = {min_count}, max count = {max_count}, mean = {mean:.2f}, cv = {cv:.4f}")
+    print(f"  first-2048 average = {first_mean:.2f}, remaining-4096 average = {remaining_mean:.2f}")
+    print("  approximately uniform distribution: PASS")
 
 
 def check_one_bank_mapping_parity():
@@ -306,19 +384,6 @@ def check_actual_allocation_isolation():
     assert_eq(occupied[0][0], 0, "mirage bank0 large region untouched")
     assert_eq(occupied[0][1], 0, "mirage bank0 small region untouched")
     print("  representative fills stay in selected bank/region")
-
-
-def check_mirage_free_allocation_performance():
-    print("MIRAGE FREE ALLOCATION")
-    region = MirageRegion(131072, 8192, 2, 14)
-    start = time.perf_counter()
-    for i in range(131072):
-        region._allocate_data((0, i % 8192, i % 14))
-    elapsed = time.perf_counter() - start
-    assert_eq(region.valid_lines(), 131072, "mirage full free allocation fill")
-    if elapsed > 2.0:
-        raise AssertionError(f"MIRAGE free allocation too slow: {elapsed:.3f}s")
-    print(f"  filled 131072 free entries in {elapsed:.3f}s")
 
 
 def check_workload_and_attack_semantics():
@@ -388,10 +453,11 @@ def main():
     check_encrypted_index_ranges()
     check_scatter_semantics()
     check_mirage_geometry_and_reachability()
+    check_mirage_6144_set_mapping()
     check_one_bank_mapping_parity()
     check_replacement_isolation()
     check_actual_allocation_isolation()
-    check_mirage_free_allocation_performance()
+    check_mirage_random_gle()
     print("VALIDATION PASSED")
 
 

@@ -2,7 +2,7 @@ import math
 import os
 import random
 import sys
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from functools import lru_cache
 
 from common import (
@@ -67,18 +67,18 @@ def _present_index(word_addr, num_words_per_block, num_index_bits, key_hex):
 
 
 def _present_index_mod(word_addr, num_words_per_block, num_sets, key_hex):
-    """Map an encrypted index field onto any tag-set count.
-
-    For non-power-of-two counts, this extracts ceil(log2(num_sets)) encrypted
-    bits and applies modulo.  That makes every set 0..N-1 reachable.  The modulo
-    step has a small distribution bias for non-powers of two, which is accepted
-    here for simulator simplicity.
-    """
+    """Map an encrypted index field onto any tag-set count."""
     num_sets = int(num_sets)
     if num_sets <= 1:
         return 0
-    width = int(math.ceil(math.log2(num_sets)))
-    return _present_index(word_addr, num_words_per_block, width, key_hex) % num_sets
+    if num_sets & (num_sets - 1) == 0:
+        return _present_index(word_addr, num_words_per_block, int(math.log2(num_sets)), key_hex)
+
+    offset_bits = int(math.log2(num_words_per_block))
+    ciphertext = _present_ciphertext(word_addr, num_words_per_block, key_hex)
+    end = len(ciphertext) - offset_bits
+    raw = int(ciphertext[:end], 2)
+    return raw % num_sets
 
 
 def _plain_local_set(word_addr, num_words_per_block, num_banks, sets_per_bank):
@@ -128,17 +128,17 @@ class SetAssociativeRegion:
 
 
 class MirageRegion:
-    def __init__(self, data_entries, tag_sets_per_skew, tag_skews=2, tag_ways=14):
+    def __init__(self, data_entries, tag_sets_per_skew, tag_skews=2, tag_ways=14, rng=None):
         self.data_entries = int(data_entries)
         self.tag_sets_per_skew = int(tag_sets_per_skew)
         self.tag_skews = int(tag_skews)
         self.tag_ways = int(tag_ways)
+        self.rng = rng if rng is not None else random
         self.tags = [
             [[None for _ in range(self.tag_ways)] for _ in range(self.tag_sets_per_skew)]
             for _ in range(self.tag_skews)
         ]
         self.data_store = [None for _ in range(self.data_entries)]
-        self.free_data = deque(range(self.data_entries))
 
     @property
     def tag_entries(self):
@@ -156,7 +156,7 @@ class MirageRegion:
         ]
         min_count = min(counts)
         candidate_skews = [skew for skew, count in enumerate(counts) if count == min_count]
-        skew = random.choice(candidate_skews)
+        skew = self.rng.choice(candidate_skews)
         set_idx = indexes[skew]
         ways = self.tags[skew][set_idx]
 
@@ -166,7 +166,7 @@ class MirageRegion:
                 ways[way] = (tag, data_idx)
                 return False
 
-        way = random.randrange(self.tag_ways)
+        way = self.rng.randrange(self.tag_ways)
         old = ways[way]
         data_idx = old[1] if old is not None else self._allocate_data((skew, set_idx, way))
         self.data_store[data_idx] = (skew, set_idx, way)
@@ -174,11 +174,8 @@ class MirageRegion:
         return False
 
     def _allocate_data(self, pointer):
-        if self.free_data:
-            i = self.free_data.popleft()
-            self.data_store[i] = pointer
-            return i
-        victim = random.randrange(self.data_entries)
+        # MIRAGE GLE always samples the region-local data store, even when empty slots remain.
+        victim = self.rng.randrange(self.data_entries)
         old_pointer = self.data_store[victim]
         if old_pointer is not None:
             old_skew, old_set, old_way = old_pointer
@@ -188,6 +185,48 @@ class MirageRegion:
 
     def valid_lines(self):
         return sum(1 for entry in self.data_store if entry is not None)
+
+    def check_pointer_invariants(self):
+        live_data = {}
+        live_tags = {}
+
+        for data_idx, pointer in enumerate(self.data_store):
+            if pointer is None:
+                continue
+            skew, set_idx, way = pointer
+            if not (0 <= skew < self.tag_skews):
+                raise AssertionError(f"data[{data_idx}] points to invalid skew {skew}")
+            if not (0 <= set_idx < self.tag_sets_per_skew):
+                raise AssertionError(f"data[{data_idx}] points to invalid set {set_idx}")
+            if not (0 <= way < self.tag_ways):
+                raise AssertionError(f"data[{data_idx}] points to invalid way {way}")
+            tag_entry = self.tags[skew][set_idx][way]
+            if tag_entry is None:
+                raise AssertionError(f"data[{data_idx}] points to an invalid tag")
+            if tag_entry[1] != data_idx:
+                raise AssertionError(
+                    f"data[{data_idx}] reverse pointer disagrees with tag forward pointer {tag_entry[1]}"
+                )
+            live_data[pointer] = data_idx
+
+        for skew in range(self.tag_skews):
+            for set_idx in range(self.tag_sets_per_skew):
+                for way, entry in enumerate(self.tags[skew][set_idx]):
+                    if entry is None:
+                        continue
+                    pointer = (skew, set_idx, way)
+                    data_idx = entry[1]
+                    if pointer not in live_data:
+                        raise AssertionError(f"tag {pointer} points to unoccupied data[{data_idx}]")
+                    if self.data_store[data_idx] != pointer:
+                        raise AssertionError(f"tag {pointer} forward pointer disagrees with data reverse pointer")
+                    if data_idx in live_tags:
+                        raise AssertionError(f"duplicate live forward pointer to data[{data_idx}]")
+                    live_tags[data_idx] = pointer
+
+        if len(live_data) != len(live_tags):
+            raise AssertionError("live tag/data pointer cardinality mismatch")
+        return True
 
 
 class BankedArchitectureCache:
